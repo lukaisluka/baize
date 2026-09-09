@@ -1,4 +1,5 @@
 import { ensureDataLayout, resolveHome } from './paths.js'
+import { join } from 'node:path'
 import { loadConfig, saveConfig } from './config.js'
 import { createLogger } from './logger.js'
 import { close, createBaizeServer, listen } from './server.js'
@@ -6,6 +7,7 @@ import { openBrowser } from './open-browser.js'
 import { CbmSupervisor } from './cbm.js'
 import { createRepoRegistry } from './repos.js'
 import { createAcpBridge } from './acp-bridge.js'
+import { prepareAgentWorkspace, cbmMcpServer } from './agent-workspace.js'
 import { createGitLabService } from './gitlab.js'
 import { createSyncEngine } from './sync.js'
 
@@ -59,6 +61,14 @@ export async function startApp({
     home,
     agentCommand: config.agentCommand ?? 'omp',
     logger,
+    // Fresh per connection: the fleet listing and CBM wiring must reflect the
+    // repos indexed so far, and a moved binary path heals on the next chat.
+    prepareWorkspace: () =>
+      prepareAgentWorkspace({ agentDir: join(home, 'agent'), repos: config.repos ?? {} }),
+    agentMcpServers: () => {
+      const binaryPath = cbm.binaryPathOrNull(logger)
+      return binaryPath ? [cbmMcpServer({ binaryPath, cacheDir: dirs.index })] : []
+    },
   })
 
   const bound = await listen(server, { port: port ?? config.port })

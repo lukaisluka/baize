@@ -82,11 +82,25 @@ export type CompactionItem = {
   compactionId: string;
 };
 
+/**
+ * A finished turn that produced an answer (agent_message) backed by no tool
+ * evidence (zero tool_call blocks) and was not aborted (turn_notice): the
+ * tracer-bullet verifiability rule (#10) — an answer with no supporting
+ * citation is visibly marked unverified rather than reading as grounded.
+ * Trailing row at the end of that turn's flow. Turns still mid-conversation
+ * (`requires_action`), aborted, or answer-less are never marked.
+ */
+export type UnverifiedItem = {
+  key: string;
+  kind: 'unverified';
+};
+
 export type FlatItem =
   | BlockFlatItem
   | StandalonePermissionItem
   | StandaloneElicitationItem
-  | CompactionItem;
+  | CompactionItem
+  | UnverifiedItem;
 
 // Identity-stable wrappers. All WeakMaps: keys are session-owned objects, so
 // caches are scoped per session graph and collected with it. The base variant
@@ -114,14 +128,25 @@ export function projectMessageStream(doc: SessionDocument): FlatItem[] {
   const permissions = attachedPermissions(doc.permissions);
   const streamingBlock = findStreamingBlock(doc);
 
-  // Pass 1: block items in flow order; permission fields still empty.
+  // Pass 1: block items in flow order; permission fields still empty. Turn
+  // bookkeeping for the unverified rows (pass 4) rides along.
   const blocks: Block[] = [];
   const blockItems: BlockFlatItem[] = [];
+  const turnBlockCounts: number[] = [];
+  const turnUnmarkable: boolean[] = [];
   for (const turn of doc.turns) {
     turn.blocks.forEach((block, i) => {
-      blocks.push(block);
-      blockItems.push(blockItem(`${turn.id}-${i}`, block, block === streamingBlock, null));
-    });
+      blocks.push(block)
+      blockItems.push(blockItem(`${turn.id}-${i}`, block, block === streamingBlock, null))
+    })
+    turnBlockCounts.push(turn.blocks.length)
+    // Unverified is a claim about an ANSWER: tool evidence makes it verified,
+    // no agent_message means no answer to verify yet, and a turn_notice
+    // (stopReason ≠ end_turn) aborted the turn — a marker there is noise.
+    turnUnmarkable.push(
+      turn.blocks.some((b) => b.kind === 'tool_call' || b.kind === 'turn_notice') ||
+        !turn.blocks.some((b) => b.kind === 'agent_message'),
+    )
   }
 
   // Pass 2: permission placement against parallel claim state — placement
@@ -158,7 +183,22 @@ export function projectMessageStream(doc: SessionDocument): FlatItem[] {
   // unattached permissions render as independent trailing cards.
   const items: FlatItem[] = blockItems.map((item, i) =>
     placed[i] ? blockItem(item.key, item.block, item.streaming, placed[i]) : item,
-  );
+  )
+
+  // Pass 4: the tracer-bullet verifiability rule (#10) — a finished turn
+  // with an answer but zero tool_call blocks gets a trailing unverified row.
+  // Spliced at turn boundaries from the END so earlier indices stay valid.
+  // `requires_action` is mid-conversation (elicitation/permission pending),
+  // not finished: only a following turn, or doc-level idle, settles this one.
+  const lastTurnIndex = doc.turns.length - 1;
+  for (let t = lastTurnIndex, end = blockItems.length; t >= 0; t--) {
+    const settled = t < lastTurnIndex || doc.status === 'idle';
+    if (settled && turnBlockCounts[t]! > 0 && !turnUnmarkable[t]) {
+      items.splice(end, 0, { key: `unverified-${doc.turns[t]!.id}`, kind: 'unverified' });
+    }
+    end -= turnBlockCounts[t]!;
+  }
+
   for (const permission of standalone) {
     items.push(standaloneItem(permission));
   }

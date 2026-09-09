@@ -31,6 +31,10 @@ rl.on('line', (line) => {
   } else if (msg.method === 'die') {
     send({ jsonrpc: '2.0', id: msg.id, result: { dying: true } })
     setTimeout(() => process.exit(1), 50)
+  } else if (msg.method === 'echo-params' || msg.method === 'session/new' || msg.method === 'session/load' || msg.method === 'session/resume' || msg.method === 'session/prompt') {
+    // Reflects the exact params the bridge delivered (MCP injection tests);
+    // session/* are the methods the bridge actually injects into.
+    send({ jsonrpc: '2.0', id: msg.id, result: { params: msg.params } })
   } else if (msg.method === 'split') {
     // One write carrying a full message plus half of the next, remainder in a
     // later write — the bridge must reassemble lines across TCP read chunks.

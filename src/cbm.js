@@ -64,6 +64,19 @@ export class CbmSupervisor {
     return (this.binaryPath ??= this.requestedBinaryPath ?? resolveCbmBinary())
   }
 
+  /** The binary path if it can be resolved right now, else null. Callers that
+   * only want to wire other processes to the same binary (e.g. the agent
+   * workspace) must not crash when the download failed — they degrade, but
+   * never silently: the resolve error carries the remedy, so log it. */
+  binaryPathOrNull(logger) {
+    try {
+      return this.#binaryPath()
+    } catch (err) {
+      logger?.warn(`cbm: agent chat runs without codebase-memory tools — ${err.message}`)
+      return null
+    }
+  }
+
   async ensure() {
     if (this.child && this.child.exitCode === null && this.ready) return this.ready
     this.stopping = false

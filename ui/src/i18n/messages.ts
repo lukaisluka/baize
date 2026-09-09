@@ -115,6 +115,12 @@ export const messages = {
   // The scroller's a11y name (#221): focusable but unnamed read as a bare
   // tab-stop to screen readers.
   'stream.transcript': { en: 'Conversation transcript', zh: '对话记录' },
+  // Tracer-bullet verifiability (#10): a settled answer that cites no tool
+  // evidence is marked, not silently read as grounded.
+  'stream.unverified': {
+    en: 'Answer has no tool-backed citations — unverified',
+    zh: '回答未引用任何工具证据 — 未验证',
+  },
 
   // ---- PermissionCard ----
   'perm.title': { en: 'Agent requests approval', zh: 'Agent 请求批准' },

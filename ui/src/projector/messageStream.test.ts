@@ -246,6 +246,8 @@ describe('projection unsupported fallback blocks', () => {
       'user_message',
       'unsupported',
       'agent_message',
+      // The turn settled with no tool calls — the #10 unverified row trails it.
+      'unverified',
     ]);
   });
 });
@@ -396,5 +398,89 @@ describe('projection context compaction rows', () => {
       .filter((item): item is BlockFlatItem => item.kind === 'block')
       .find((item) => item.block.kind === 'compaction_notice');
     expect(notice?.block).toMatchObject({ kind: 'compaction_notice', outcome: 'completed' });
+  });
+});
+
+describe('projection unverified rows (#10 tracer bullet)', () => {
+  const fold = (updates: Parameters<typeof applyUpdate>[1][]) =>
+    updates.reduce(applyUpdate, emptySession());
+
+  const turnWithoutTools = [
+    { sessionUpdate: 'user_message' as const, content: [{ type: 'text' as const, text: 'hi' }] },
+    { sessionUpdate: 'agent_message_chunk' as const, content: { type: 'text' as const, text: 'hello!' } },
+  ];
+  const turnWithTool = [
+    { sessionUpdate: 'user_message' as const, content: [{ type: 'text' as const, text: 'where is greet?' }] },
+    { sessionUpdate: 'tool_call' as const, toolCallId: 't-1', title: 'search', kind: 'other' as const },
+    { sessionUpdate: 'agent_message_chunk' as const, content: { type: 'text' as const, text: 'in hello.js:1' } },
+  ];
+
+  it('marks a settled turn with no tool calls as unverified', () => {
+    const doc = fold([...turnWithoutTools, { sessionUpdate: 'status_changed', status: 'idle' }]);
+    const items = projectMessageStream(doc);
+    expect(items.at(-1)).toEqual({ key: expect.stringContaining('unverified'), kind: 'unverified' });
+  });
+
+  it('does not mark while the turn is still running', () => {
+    const doc = fold([...turnWithoutTools, { sessionUpdate: 'status_changed', status: 'running' }]);
+    const items = projectMessageStream(doc);
+    expect(items.some((item) => item.kind === 'unverified')).toBe(false);
+  });
+
+  it('does not mark while the conversation awaits the user (requires_action)', () => {
+    const doc = fold([
+      ...turnWithoutTools,
+      { sessionUpdate: 'status_changed', status: 'requires_action' },
+    ]);
+    const items = projectMessageStream(doc);
+    expect(items.some((item) => item.kind === 'unverified')).toBe(false);
+  });
+
+  it('does not mark an aborted turn (turn_notice) — there is no answer to verify', () => {
+    const doc = fold([
+      ...turnWithoutTools,
+      { sessionUpdate: 'turn_notice', stopReason: 'cancelled' },
+      { sessionUpdate: 'status_changed', status: 'idle' },
+    ]);
+    const items = projectMessageStream(doc);
+    expect(items.some((item) => item.kind === 'unverified')).toBe(false);
+  });
+
+  it('does not mark an answer-less turn — no agent_message means nothing to verify', () => {
+    const doc = fold([
+      // The optimistic-user-message intermediate state: the turn exists, the
+      // answer does not yet.
+      { sessionUpdate: 'user_message', content: [{ type: 'text', text: 'hi' }] },
+      { sessionUpdate: 'status_changed', status: 'idle' },
+    ]);
+    const items = projectMessageStream(doc);
+    expect(items.some((item) => item.kind === 'unverified')).toBe(false);
+  });
+
+  it('never marks a turn that used tools (the citations live in its cards)', () => {
+    const doc = fold([...turnWithTool, { sessionUpdate: 'status_changed', status: 'idle' }]);
+    const items = projectMessageStream(doc);
+    expect(items.some((item) => item.kind === 'unverified')).toBe(false);
+  });
+
+  it('marks only the evidence-free turn when a mixed session settles', () => {
+    const doc = fold([
+      ...turnWithTool,
+      { sessionUpdate: 'status_changed', status: 'idle' },
+      ...turnWithoutTools,
+      { sessionUpdate: 'status_changed', status: 'idle' },
+    ]);
+    const items = projectMessageStream(doc);
+    // The unverified row trails ITS turn — after that turn's agent message,
+    // before nothing (it is the last turn), and nowhere near the tool-backed
+    // turn's flow.
+    expect(items.map((item) => (item.kind === 'block' ? item.block.kind : item.kind))).toEqual([
+      'user_message',
+      'tool_call',
+      'agent_message',
+      'user_message',
+      'agent_message',
+      'unverified',
+    ]);
   });
 });

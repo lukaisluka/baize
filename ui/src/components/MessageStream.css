@@ -62,3 +62,12 @@
   flex-shrink: 0;
   color: var(--color-faint);
 }
+
+/* Unverified answers (#10): a warning tint so the caveat reads as such. */
+.turn-notice--unverified {
+  color: var(--color-warning, var(--color-muted));
+}
+
+.turn-notice--unverified .turn-notice-icon {
+  color: var(--color-warning, var(--color-faint));
+}

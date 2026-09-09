@@ -10,7 +10,7 @@ import {
   type HTMLAttributes,
 } from 'react';
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
-import { Archive, ArrowDown, TriangleAlert } from 'lucide-react';
+import { Archive, ArrowDown, ShieldQuestion, TriangleAlert } from 'lucide-react';
 import { Spinner } from '@astryxdesign/core/Spinner';
 import type { Block, ElicitationResponse, PermissionOptionKind } from '../protocol/types';
 import { AgentMessage } from './AgentMessage';
@@ -256,6 +256,19 @@ export function MessageStream({ onResolvePermission, onResolveElicitation, onOpe
                 <div className="turn-notice" role="status">
                   <Spinner size="sm" className="turn-notice-icon" />
                   <span>{t('stream.compacting')}</span>
+                </div>
+              </ContentColumn>
+            );
+          }
+          if (item.kind === 'unverified') {
+            // The tracer-bullet verifiability rule (#10): a settled answer
+            // with zero tool calls reads as grounded unless marked. A quiet
+            // centered row, like turn notices — visible, not loud.
+            return (
+              <ContentColumn>
+                <div className="turn-notice turn-notice--unverified" role="note">
+                  <ShieldQuestion size={13} className="turn-notice-icon" />
+                  <span>{t('stream.unverified')}</span>
                 </div>
               </ContentColumn>
             );

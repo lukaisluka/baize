@@ -54,10 +54,11 @@ test('recordedIds reads the resume set and survives a corrupt trailing line', ()
 // A timed-out turn is cancelled; the agent's late flush (chunk + idle) must
 // land in the timed-out row, never bleed into the next question's answer.
 test('a cancelled turn keeps its late updates to itself', { timeout: 20000 }, async () => {
+  const agentWs = mkdtempSync(join(tmpdir(), 'baize-bench-ws-'))
   const server = createServer((req, res) => {
     if (req.url === '/api/repos') {
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ repos: [], agentWorkspace: mkdtempSync(join(tmpdir(), 'baize-bench-ws-')) }))
+      res.end(JSON.stringify({ repos: [], agentWorkspace: agentWs }))
       return
     }
     res.writeHead(404).end()
@@ -89,6 +90,7 @@ test('a cancelled turn keeps its late updates to itself', { timeout: 20000 }, as
     await bridge.stop()
     await close(server)
     rmSync(home, { recursive: true, force: true })
+    rmSync(agentWs, { recursive: true, force: true })
     rmSync(dir, { recursive: true, force: true })
   }
 })

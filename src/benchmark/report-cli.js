@@ -22,7 +22,10 @@ import { computeReport, loadRun, loadReviews, toMarkdown, worktreeResolver } fro
 function arg(name, fallback = null) {
   const index = process.argv.indexOf(name)
   const value = index >= 0 ? process.argv[index + 1] : undefined
-  return value !== undefined ? value : fallback
+  // A flag's value must not be another flag — `--dataset --url` is a usage
+  // error, not a dataset path called "--url".
+  if (value === undefined || value.startsWith('--')) return index >= 0 ? undefined : fallback
+  return value
 }
 
 const runPath = process.argv[2]

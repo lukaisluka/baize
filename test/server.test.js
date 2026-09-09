@@ -54,7 +54,7 @@ mkdirSync(join(distDir, 'assets'), { recursive: true })
 writeFileSync(join(distDir, 'index.html'), '<!doctype html><title>baize spa</title>')
 writeFileSync(join(distDir, 'assets', 'app.js'), 'console.log("spa")')
 
-const server = createBaizeServer({ logger, registry, gitlab, sync, uiDist: distDir })
+const server = createBaizeServer({ logger, registry, gitlab, sync, uiDist: distDir, agentWorkspace: '/home-under-test/agent' })
 const noDistServer = createBaizeServer({ logger, registry, gitlab, sync, uiDist: join(home, 'no-dist') })
 const bound = await listen(server, { port: 0 })
 const noDistBound = await listen(noDistServer, { port: 0 })
@@ -121,6 +121,9 @@ test('GET /api/repos lists registry state', async () => {
   assert.equal(body.repos.length, 2)
   assert.equal(body.repos[0].name, 'svc')
   assert.equal(body.repos[0].stats.nodes, 6)
+  // The agent workspace is reported so headless clients (benchmark runner)
+  // can use it as session/new's cwd — the AGENTS.md contract (#17).
+  assert.equal(body.agentWorkspace, '/home-under-test/agent')
   // Fleet entries carry the indexing fields the UI table joins on.
   const mirror = body.repos[1]
   assert.equal(mirror.mirror, true)

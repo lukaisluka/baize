@@ -26,7 +26,9 @@
     "build:ui": "npm run build -w ui",
     "prepack": "npm run build:ui",
     "test": "node --test test/*.test.js",
-    "test:ui": "npm run test -w ui"
+    "test:ui": "npm run test -w ui",
+    "benchmark:run": "node src/benchmark/run-cli.js",
+    "benchmark:report": "node src/benchmark/report-cli.js"
   },
   "dependencies": {
     "codebase-memory-mcp": "0.10.8",

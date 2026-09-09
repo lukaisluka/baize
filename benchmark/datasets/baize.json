@@ -1,0 +1,851 @@
+{
+  "name": "baize-dogfood-v1",
+  "description": "Seed dataset (issue #17): 60 questions across the PRD §14 categories, instantiated against baize's own repository as the first fleet. Expected answers are drafts pending human review (expected.reviewed=false); cross-repo/event categories are templates until a real multi-repo estate is indexed.",
+  "questions": [
+    {
+      "id": "q001",
+      "category": "code-location",
+      "question": "Where is the ACP WebSocket-to-stdio bridge implemented?",
+      "expected": {
+        "answer": "src/acp-bridge.js — createAcpBridge frames WebSocket messages to stdio JSON-RPC lines and back.",
+        "evidence": [
+          "lukaisluka/baize/src/acp-bridge.js"
+        ],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q002",
+      "category": "code-location",
+      "question": "Which function injects the CBM MCP server into session requests?",
+      "expected": {
+        "answer": "injectMcpServers in src/acp-bridge.js rewrites session/new|load|resume params before forwarding.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q003",
+      "category": "code-location",
+      "question": "Where does the fleet regenerate the agent's AGENTS.md?",
+      "expected": {
+        "answer": "prepareAgentWorkspace in src/agent-workspace.js, wired per connection from src/app.js.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q004",
+      "category": "code-location",
+      "question": "Where is the bare-mirror sync engine (clone/fetch) implemented?",
+      "expected": {
+        "answer": "src/sync.js — syncMirror clones/fetches bare mirrors and materializes linked worktrees.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q005",
+      "category": "code-location",
+      "question": "Where does BaiZe resolve its home directory (~/.baize)?",
+      "expected": {
+        "answer": "src/paths.js — BAIZE_HOME env override, defaulting to ~/.baize.",
+        "evidence": [
+          "lukaisluka/baize/src/paths.js"
+        ],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q006",
+      "category": "code-location",
+      "question": "Which module owns the code-index registry state machine (kickIndex, retries)?",
+      "expected": {
+        "answer": "src/repos.js — the registry with indexing states, backoff retries, and CBM wiring.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q007",
+      "category": "code-location",
+      "question": "Where is the DNS-rebinding guard that checks Host/Origin on WebSocket upgrade?",
+      "expected": {
+        "answer": "The upgrade handler in src/acp-bridge.js destroys non-local Host/Origin upgrades.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q008",
+      "category": "code-location",
+      "question": "Where is the first-run setup wizard UI implemented?",
+      "expected": {
+        "answer": "ui/src/components/SetupWizard.tsx with the phase hook useBaizeSetup.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q009",
+      "category": "caller-callee",
+      "question": "Who calls syncMirror and what happens on its result?",
+      "expected": {
+        "answer": "The sync queue in src/sync.js calls it per repo; success with a revision calls onRevision which kicks indexing via the registry.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q010",
+      "category": "caller-callee",
+      "question": "What calls prepareAgentWorkspace and when?",
+      "expected": {
+        "answer": "createAcpBridge invokes the prepareWorkspace callback before spawning the agent child on every WebSocket connection.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q011",
+      "category": "caller-callee",
+      "question": "Which code paths call binaryPathOrNull?",
+      "expected": {
+        "answer": "src/app.js's agentMcpServers closure calls it per connection; null degrades to no MCP injection with a logged remedy.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q012",
+      "category": "caller-callee",
+      "question": "Who consumes the onRevision hook?",
+      "expected": {
+        "answer": "src/app.js wires onRevision to registry.ensureFleetRepo, which registers the fleet repo and kicks indexing.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q013",
+      "category": "caller-callee",
+      "question": "What calls kickIndex and with which revisions?",
+      "expected": {
+        "answer": "ensureFleetRepo on sync revisions, and the describe() rebuild path when a stale token is found in CBM.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q014",
+      "category": "caller-callee",
+      "question": "Which functions does the HTTP API's /api/sync handler call?",
+      "expected": {
+        "answer": "handleApi in src/server.js calls sync.states() for GET and syncAll()/syncNow() for POST.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q015",
+      "category": "caller-callee",
+      "question": "Who calls loadDataset/extractCitations in the benchmark harness?",
+      "expected": {
+        "answer": "run-cli.js loads datasets; run.js's collectTurn extracts citations from answers; report.js recomputes them.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q016",
+      "category": "cross-repo-flow",
+      "question": "Which service calls the baize management API from another repository?",
+      "expected": {
+        "answer": "Pending a real multi-repo estate — baize currently has no external HTTP callers in the fleet.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "needs-multi-repo-estate",
+      "notes": "Instantiate against a fleet with a real consumer service once available."
+    },
+    {
+      "id": "q017",
+      "category": "cross-repo-flow",
+      "question": "Trace an HTTP call that crosses repository boundaries in the fleet.",
+      "expected": {
+        "answer": "Pending a real multi-repo estate.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "needs-multi-repo-estate"
+    },
+    {
+      "id": "q018",
+      "category": "event-tracing",
+      "question": "Which repositories produce/consume Kafka topics in the fleet?",
+      "expected": {
+        "answer": "Pending a real estate with Kafka — baize itself has no message bus.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "needs-multi-repo-estate"
+    },
+    {
+      "id": "q019",
+      "category": "event-tracing",
+      "question": "Trace an event from its producer repo to every consumer repo.",
+      "expected": {
+        "answer": "Pending a real estate with message queues.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "needs-multi-repo-estate"
+    },
+    {
+      "id": "q020",
+      "category": "architecture",
+      "question": "What are the main modules of the baize server and their responsibilities?",
+      "expected": {
+        "answer": "src/ has ~13 flat modules: cli/app entry, server (HTTP+/fleet page), acp-bridge (agent), sync/repos (fleet), gitlab (API), cbm (index), config/paths, agent-workspace, benchmark.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q021",
+      "category": "architecture",
+      "question": "How does a chat message travel from the browser to the agent and back?",
+      "expected": {
+        "answer": "UI WebSocket to /acp; acp-bridge frames to omp stdio JSON-RPC; updates flow back as session/update notifications.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q022",
+      "category": "architecture",
+      "question": "What is the CBM daemon model and why does baize share one cache dir?",
+      "expected": {
+        "answer": "CBM runs a per-account daemon; baize's supervisor and the agent's injected server both set CBM_CACHE_DIR to the same index dir so they share the daemon and index.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q023",
+      "category": "architecture",
+      "question": "Where does the UI's session state live and how is it projected?",
+      "expected": {
+        "answer": "The store keeps session documents; ui/src/projector/messageStream.ts folds them into flat items (ADR 0006 identity caches).",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q024",
+      "category": "architecture",
+      "question": "How is the repository laid out for publishing?",
+      "expected": {
+        "answer": "Single npm package: src/ server, ui/ vendored Panda SPA built to ui/dist, bin entry baize -> src/cli.js.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q025",
+      "category": "architecture",
+      "question": "What prevents the agent from reading repositories outside the fleet?",
+      "expected": {
+        "answer": "Only fleet worktrees are indexed and listed in AGENTS.md; the agent has no other repo access by construction.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q026",
+      "category": "architecture",
+      "question": "How does the wizard decide to show, and what can override it?",
+      "expected": {
+        "answer": "useBaizeSetup derives phase from /api/gitlab/settings (baseUrl+token+selection); a dismiss (skip) hides it until reload; the settings route renders ahead of it.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q027",
+      "category": "architecture",
+      "question": "What are the two UI-server channels and what rides each?",
+      "expected": {
+        "answer": "ACP over WebSocket (/acp) for chat; the BaiZe management API (/api/*) for fleet, sync, and settings.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q028",
+      "category": "dependency-inventory",
+      "question": "What are baize's runtime dependencies?",
+      "expected": {
+        "answer": "package.json lists only codebase-memory-mcp (pinned 0.10.8) and ws; Node stdio does the rest.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q029",
+      "category": "dependency-inventory",
+      "question": "Which UI dependencies does the chat stream renderer use?",
+      "expected": {
+        "answer": "The UI uses React, lucide-react icons, @astryxdesign/core components, and virtua for the virtualized stream.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q030",
+      "category": "dependency-inventory",
+      "question": "What does baize depend on at runtime on the host besides Node?",
+      "expected": {
+        "answer": "System git (clone/fetch/worktrees), the CBM static binary (npm postinstall download), and optionally omp + Bun for chat.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q031",
+      "category": "dependency-inventory",
+      "question": "Which Node built-ins does the sync engine use for child processes?",
+      "expected": {
+        "answer": "node:child_process spawn with timeouts and kill handling in src/sync.js.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q032",
+      "category": "dependency-inventory",
+      "question": "Does the UI import any baize server code?",
+      "expected": {
+        "answer": "No — the SPA talks only over WebSocket/HTTP; ui/ is vendored Panda plus baize additions.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q033",
+      "category": "dependency-inventory",
+      "question": "What does the benchmark runner depend on?",
+      "expected": {
+        "answer": "ws for the ACP client, Node fetch for /api, and the dataset/report modules in src/benchmark/.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q034",
+      "category": "change-impact",
+      "question": "If the shape of /api/repos changed, which code would be affected?",
+      "expected": {
+        "answer": "src/server.js handler, the /fleet page consumer in FLEET_HTML, the UI's baizeApi.ts, and the benchmark runner/report.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q035",
+      "category": "change-impact",
+      "question": "What breaks if CBM's daemon switches cache-dir semantics?",
+      "expected": {
+        "answer": "Both src/cbm.js supervisor and the agent-injected server (src/agent-workspace.js env) must stay aligned on the same CBM_CACHE_DIR.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q036",
+      "category": "change-impact",
+      "question": "Who is affected by changing the citation format in AGENTS.md?",
+      "expected": {
+        "answer": "src/agent-workspace.js prompt text, the UI unverified marker semantics, and the benchmark's extractCitations parser.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q037",
+      "category": "change-impact",
+      "question": "What would renaming registry config fields (e.g. lastIndexedRevision) impact?",
+      "expected": {
+        "answer": "src/repos.js, config migration in src/config.js consumers, /api/repos response, fleet page, and prepareAgentWorkspace's table.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q038",
+      "category": "change-impact",
+      "question": "If OMP stopped supporting session mcpServers, what is the fallback?",
+      "expected": {
+        "answer": "MCP injection (injectMcpServers) is the only wiring channel — the PRD §17 note records that project-level .omp/mcp.json is not loaded in ACP mode.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q039",
+      "category": "change-impact",
+      "question": "Which tests guard the bridge injection behavior?",
+      "expected": {
+        "answer": "test/acp-bridge.test.js covers session/new|load|resume injection, client-wins, and pass-through of non-session methods.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q040",
+      "category": "business-logic",
+      "question": "How does needs-auth handling work for fleet mirrors?",
+      "expected": {
+        "answer": "Git auth failures mark the repo needs-auth with exponential backoff; manual sync overrides the backoff; the PAT is never embedded in remote URLs.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q041",
+      "category": "business-logic",
+      "question": "When does a repo re-index?",
+      "expected": {
+        "answer": "On every tracked-revision change via onRevision; same revision is a no-op; failures retry with exponential backoff aimed at the latest seen revision.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q042",
+      "category": "business-logic",
+      "question": "How does the unverified marker decide a turn is unverified?",
+      "expected": {
+        "answer": "A settled turn (following turn exists or doc idle) that produced an agent_message, contains no tool_call and no turn_notice gets the marker.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q043",
+      "category": "business-logic",
+      "question": "How is the PAT protected across the system?",
+      "expected": {
+        "answer": "config.json 0600; used only for GitLab API calls; never in git remote URLs, logs, or UI responses (gitlab.js sanitizes errors).",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q044",
+      "category": "business-logic",
+      "question": "What does the wizard's disk estimate show when GitLab withholds statistics?",
+      "expected": {
+        "answer": "sizeBytes is null — the summary says size unknown, or 'at least X (k/n report size)' for partial data; never zero.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q045",
+      "category": "business-logic",
+      "question": "How does the first sync step avoid wedging on a failed start?",
+      "expected": {
+        "answer": "Start and poll errors are separate channels; a failed POST keeps its error with a Retry button; settled requires non-empty mirror states.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q046",
+      "category": "business-logic",
+      "question": "Why do mirrors materialize linked worktrees?",
+      "expected": {
+        "answer": "CBM indexes readable checkouts; a bare mirror has no working tree, so sync adds a worktree at the tracked revision under ~/.baize/worktrees/.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q047",
+      "category": "ambiguous-debugging",
+      "question": "The chat answers without citations — where do you look first?",
+      "expected": {
+        "answer": "Check baize.log for the MCP injection line; a missing CBM binary logs the remedy; the UI marks such turns unverified.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q048",
+      "category": "ambiguous-debugging",
+      "question": "Indexing seems stuck after a GitLab outage — what state machines are involved?",
+      "expected": {
+        "answer": "The registry's retry backoff (retryAt) and the sync engine's needs-auth backoff both pause work; /api/repos shows retryAt and error.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q049",
+      "category": "ambiguous-debugging",
+      "question": "Two baize instances on one machine fight over the CBM daemon — why?",
+      "expected": {
+        "answer": "CBM's daemon is a per-account singleton bound to the first CBM_CACHE_DIR; a second cache dir cannot start until the first exits.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q050",
+      "category": "ambiguous-debugging",
+      "question": "A repo shows ready but searches return nothing — what could be wrong?",
+      "expected": {
+        "answer": "The agent may be querying a different project name (CBM normalizes slashes to dashes) or a stale index; check AGENTS.md and index stats.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q051",
+      "category": "ambiguous-debugging",
+      "question": "Wizard verify succeeds but discovery 404s — likely causes?",
+      "expected": {
+        "answer": "The group path may not exist or the PAT lacks read access to it; gitlab.js maps 404 to GITLAB_NOT_FOUND with the path echoed.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q052",
+      "category": "ambiguous-debugging",
+      "question": "The UI shows 'requires_action' but no permission card — what does that mean?",
+      "expected": {
+        "answer": "An elicitation is pending; the conversation is mid-flight, so the unverified marker stays hidden until the turn settles.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q053",
+      "category": "ambiguous-debugging",
+      "question": "Sync works from the fleet page but the agent sees no repos — why?",
+      "expected": {
+        "answer": "AGENTS.md is regenerated per connection; if the connection predates indexing, reconnect — or CBM binary resolution failed (check the log warn).",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q054",
+      "category": "code-inventory",
+      "question": "How many HTTP endpoints does the management API expose?",
+      "expected": {
+        "answer": "Nine routes under /api: health, repos (GET/POST), gitlab settings/verify/discover, sync (GET/POST), sync/branch.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q055",
+      "category": "code-inventory",
+      "question": "Which files make up the benchmark harness?",
+      "expected": {
+        "answer": "src/benchmark/{dataset,run,report}.js plus run-cli.js/report-cli.js and benchmark/datasets/*.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q056",
+      "category": "code-inventory",
+      "question": "What test suites exist for the server?",
+      "expected": {
+        "answer": "test/*.test.js one per src module, plus test/fixtures/fake-agent.mjs and a CBM integration suite that skips without the binary.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q057",
+      "category": "code-inventory",
+      "question": "Which UI components did BaiZe add on top of Panda?",
+      "expected": {
+        "answer": "SetupWizard (+api/baizeApi), the unverified notice in MessageStream, and i18n keys for both.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q058",
+      "category": "code-inventory",
+      "question": "How is OMP telemetry disabled?",
+      "expected": {
+        "answer": "The overlay ~/.baize/omp-overlay.yml sets startup.checkUpdate false and the bridge scrubs OTEL_* env vars.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q059",
+      "category": "code-inventory",
+      "question": "What does the /fleet page offer that the wizard does not?",
+      "expected": {
+        "answer": "Ongoing management: sync now per repo/all, branch overrides, index state, adding local repos outside GitLab.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    },
+    {
+      "id": "q060",
+      "category": "code-inventory",
+      "question": "Which logs does baize write and where?",
+      "expected": {
+        "answer": "~/.baize/logs/baize.log — startup, requests, CBM/agent lifecycle, bridge injection lines.",
+        "evidence": [],
+        "reviewed": false
+      },
+      "relevantRepos": [
+        "lukaisluka/baize"
+      ],
+      "applicability": "ok"
+    }
+  ]
+}

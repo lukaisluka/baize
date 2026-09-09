@@ -20,7 +20,7 @@ function capturingLogger() {
   return { lines, info: push('info'), warn: push('warn'), error: push('error') }
 }
 
-function project(id, path) {
+function project(id, path, repositorySize = id * 1024) {
   return {
     id,
     path_with_namespace: path,
@@ -29,6 +29,7 @@ function project(id, path) {
     ssh_url_to_repo: `git@gitlab.test:${path}.git`,
     http_url_to_repo: `https://gitlab.test/${path}.git`,
     archived: id % 2 === 0,
+    statistics: { repository_size: repositorySize },
   }
 }
 
@@ -57,6 +58,11 @@ function startFakeGitLab() {
     }
     if (url.pathname === '/api/v4/groups/weird/projects') {
       return json({ not: 'a list' })
+    }
+    if (url.pathname === '/api/v4/groups/no-stats/projects') {
+      const bare = project(9, 'grp/no-stats')
+      delete bare.statistics
+      return json([bare])
     }
     const projectMatch = /^\/api\/v4\/projects\/(.+)$/.exec(url.pathname)
     if (projectMatch) {
@@ -117,6 +123,20 @@ describe('gitlab client against a fake self-hosted instance', () => {
     assert.equal(repos[0].defaultBranch, 'main')
     // Recursion is delegated to the API via include_subgroups=true.
     assert.ok(fake.requests.some((r) => r.path === '/api/v4/groups/grp/projects' && r.query.get('include_subgroups') === 'true'))
+  })
+
+  test('discovery asks for statistics and surfaces repository_size for the disk estimate (#16)', async () => {
+    const { repos } = await client.discoverGroup('grp')
+    assert.ok(fake.requests.some((r) => r.path === '/api/v4/groups/grp/projects' && r.query.get('statistics') === 'true'))
+    assert.deepEqual(repos.map((r) => r.sizeBytes), [1024, 2048, 3072])
+    const resolved = await client.resolveRepos(['grp/alpha'])
+    assert.ok(fake.requests.some((r) => r.path === '/api/v4/projects/grp%2Falpha' && r.query.get('statistics') === 'true'))
+    assert.equal(resolved.repos[0].sizeBytes, 1024)
+  })
+
+  test('a project without statistics estimates null, never zero (unknown ≠ empty)', async () => {
+    const { repos } = await client.discoverGroup('no-stats')
+    assert.equal(repos[0].sizeBytes, null)
   })
 
   test('group discovery trims surrounding whitespace before encoding', async () => {

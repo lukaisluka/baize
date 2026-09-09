@@ -142,6 +142,12 @@ export function createGitLabClient({ baseUrl, token, fetchImpl = fetch, logger }
       sshUrl: project.ssh_url_to_repo,
       httpUrl: project.http_url_to_repo,
       archived: Boolean(project.archived),
+      // The mirror holds the git repository only, so the disk estimate is
+      // repository_size. statistics is only present when the request asked
+      // for it — absent means "unknown", never zero.
+      sizeBytes: typeof project.statistics?.repository_size === 'number'
+        ? project.statistics.repository_size
+        : null,
     }
   }
 
@@ -154,7 +160,9 @@ export function createGitLabClient({ baseUrl, token, fetchImpl = fetch, logger }
     async discoverGroup(groupPath) {
       const group = String(groupPath ?? '').trim()
       if (!group) throw new GitLabError('group path is required', 'GITLAB_BAD_REQUEST', 400)
-      const projects = await paged(`/groups/${encodePathSegment(group)}/projects?include_subgroups=true`)
+      const projects = await paged(
+        `/groups/${encodePathSegment(group)}/projects?include_subgroups=true&statistics=true`,
+      )
       return { repos: projects.map(toRepo) }
     },
     async resolveRepos(paths) {
@@ -162,7 +170,7 @@ export function createGitLabClient({ baseUrl, token, fetchImpl = fetch, logger }
       const missing = []
       for (const entry of paths) {
         try {
-          const project = await requestJson(`/projects/${encodePathSegment(entry)}`)
+          const project = await requestJson(`/projects/${encodePathSegment(entry)}?statistics=true`)
           repos.push(toRepo(project))
         } catch (err) {
           if (err.code === 'GITLAB_NOT_FOUND') missing.push(entry)

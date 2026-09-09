@@ -19,6 +19,7 @@ import { useForegroundLifecycle, useMainView, useSessionModes } from './projecto
 import { navigate, useHashRoute } from './routes';
 import { composerDraftKey, DEMO_DRAFT_KEY } from './composerDrafts';
 import { SettingsPage, SETTINGS_SECTIONS, type SettingsSectionId } from './components/SettingsPage';
+import SetupWizard, { useBaizeSetup } from './components/SetupWizard';
 import { useReplaySession } from './useReplaySession';
 import { useLiveSession } from './useLiveSession';
 import { UserNoticeToasts } from './components/UserNoticeToasts';
@@ -50,6 +51,8 @@ function MainScreen() {
   // Which settings section is showing (#117) — MainScreen-level so it
   // survives settings ⇄ main route flips (returning lands where you left).
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId>('general');
+  // Whether the first-run wizard (#16) owns the main column.
+  const setup = useBaizeSetup();
   const mode = usePanda((s) => s.mode);
   const doc = useActiveDoc();
   const connection = useActiveConnection();
@@ -156,7 +159,13 @@ function MainScreen() {
             </span>
           )}
         </header>
-        {onSettings ? (
+        {/* First-run wizard (#16): until GitLab URL + PAT + selection exist
+            it owns the main column — the fleet is BaiZe's reason to exist,
+            and chat needs none of this, so a skip link stays one click away.
+            phase 'loading' renders the chat rather than flashing wizard. */}
+        {setup.phase === 'needed' && setup.settings ? (
+          <SetupWizard settings={setup.settings} onFinished={setup.refresh} />
+        ) : onSettings ? (
           <SettingsPage section={settingsSection} />
         ) : (
           <>

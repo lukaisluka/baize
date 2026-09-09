@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "BaiZe main window. No plugin surfaces and no IPC commands are exposed — the shell's only job is hosting the sidecar-served UI; the window URL is set programmatically to the sidecar's port.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

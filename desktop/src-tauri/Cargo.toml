@@ -1,0 +1,29 @@
+[package]
+name = "baize-desktop"
+version = "0.1.0"
+description = "BaiZe desktop shell — spawns the baize server sidecar and hosts the UI"
+license = "MIT"
+edition = "2021"
+
+# The shell is deliberately thin (derived from Panda's desktop/src-tauri
+# pattern): the entire product lives in the webview served by the baize
+# Node sidecar. Rust here is only what a browser cannot do — own the server
+# process and guarantee the whole process tree dies with the app (PRD §6.5:
+# Tauri does NOT kill sidecar children on quit; the shell must).
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["process", "io-util", "time", "sync", "macros", "rt"] }
+
+[target.'cfg(unix)'.dependencies]
+# SIGTERM to the sidecar's whole process group (server → git/OMP/CBM/daemon).
+libc = "0.2"
+
+[profile.release]
+strip = true
+lto = true

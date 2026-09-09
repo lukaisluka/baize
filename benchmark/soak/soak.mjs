@@ -16,10 +16,11 @@
  *   commit — a real incremental re-index), then re-indexes every repo with
  *   --index-concurrency workers in parallel (write pressure);
  * - query clients loop random read tools (search_code, get_architecture,
- *   query_graph, trace_path) across all projects;
- * - a sampler snapshots every --sample-interval: per-file WAL bytes, cache
- *   dir size, daemon PID/RSS (PID change = restart), op counters, query
- *   P50/P95 per window → samples.jsonl; the final report.json summarizes.
+ *   query_graph, search_graph) across all projects;
+ * - a sampler snapshots every --sample-interval: db / stage / WAL bytes,
+ *   cache dir size, daemon PID/RSS (restart = PID change), index-worker
+ *   count/RSS, op counters, query+index P50/P95 per window → samples.jsonl;
+ *   the final report.json summarizes.
  *
  * Everything lands under --out (default /tmp/baize-soak-<ts>): fleet clones
  * are cached under --fleet-dir (default <out>/fleet) and reused across runs.
@@ -151,33 +152,68 @@ function mutateOneRepo(repos, round) {
 
 // ── process / disk sampling ────────────────────────────────────────────────
 
-/** Snapshot OUR CBM processes only: matched by the exact binary path this
- * run spawned (node_modules/...), never by bare process name — the host may
- * run the user's own codebase-memory-mcp instances that must not be touched
- * or counted. Daemon: `--cbm-daemon-internal`; stdio child: `--ui=false`. */
-function snapshotProcs(binaryPath) {
-  const res = spawnSync('ps', ['-eo', 'pid=,rss=,args='], { encoding: 'utf8' })
+/** Snapshot OUR CBM processes — attribution is exact, never by binary path
+ * alone (the path is shared by every run from this checkout, and matching on
+ * it was proven to claim OTHER runs' daemons):
+ *   stdio child  = our direct child (ppid == process.pid) with --ui=false;
+ *   daemon       = the child's direct child with --cbm-daemon-internal;
+ *   index worker = any CBM process whose --response-out points into THIS
+ *                  run's cache dir (workers carry it in argv).
+ * Anything not reachable that way is reported as null/0 and counted as
+ * unattributed — the harness never adopts a process it cannot prove is its
+ * own. Known sampling limits (README): a daemon spawned by an earlier child
+ * of ours goes missing from the chain after that child dies (ppid → 1), and
+ * restarts between two samples collapse into one. */
+function snapshotProcs(binaryPath, cacheDir) {
+  const res = spawnSync('ps', ['-ww', '-eo', 'pid=,ppid=,rss=,args='], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
   if (res.error || res.status !== 0) throw new Error(`ps failed: ${res.error ?? res.stderr}`)
-  const out = { daemonPid: null, daemonRssKb: null, childPid: null, childRssKb: null }
+  const rows = []
   for (const line of res.stdout.split('\n')) {
-    if (!line.includes(binaryPath)) continue
-    const m = /^(\d+)\s+(\d+)\s+(.*)$/.exec(line.trim())
-    if (!m) continue
-    const [, pid, rss, args] = m
-    if (args.includes('--cbm-daemon-internal')) {
-      out.daemonPid = Number(pid)
-      out.daemonRssKb = Number(rss)
-    } else if (args.includes('--ui=false')) {
-      out.childPid = Number(pid)
-      out.childRssKb = Number(rss)
+    const m = /^(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/.exec(line.trim())
+    if (m) rows.push({ pid: Number(m[1]), ppid: Number(m[2]), rssKb: Number(m[3]), args: m[4] })
+  }
+  const out = {
+    childPid: null, childRssKb: null,
+    daemonPid: null, daemonRssKb: null,
+    indexWorkers: 0, indexWorkersRssKb: 0,
+    unattributedCbm: 0,
+  }
+  const child = rows.find((r) => r.ppid === process.pid && r.args.includes(binaryPath) && r.args.includes('--ui=false'))
+  if (child) {
+    out.childPid = child.pid
+    out.childRssKb = child.rssKb
+    const daemon = rows.find((r) => r.ppid === child.pid && r.args.includes('--cbm-daemon-internal'))
+    if (daemon) {
+      out.daemonPid = daemon.pid
+      out.daemonRssKb = daemon.rssKb
+    }
+  }
+  for (const r of rows) {
+    if (!r.args.includes(binaryPath)) continue
+    if (r === child) continue
+    if (r.args.includes('--response-out') && r.args.includes(cacheDir)) {
+      out.indexWorkers += 1
+      out.indexWorkersRssKb += r.rssKb
+    } else {
+      out.unattributedCbm += 1
     }
   }
   return out
 }
 
-/** Walk the CBM cache dir and total db / -wal / -shm bytes. */
+/** Walk the CBM cache dir and total db / -wal / -shm / stage bytes. CBM
+ * 0.10.8 writes via stage-and-rename: `.db.stage.<rand>` (and nested
+ * `.stage.<rand>.tmp.<pid>.<addr>`) scratch files that replace the .db on
+ * commit — SQLite WAL files are NOT the write-amplification product here,
+ * so stage totals + per-round .db growth are the growth signal to watch.
+ * WAL counters stay in the report, but a run with indexes and zero WAL is
+ * flagged loudly rather than read as "no growth". */
 function snapshotCache(cacheDir) {
-  const out = { dbBytes: 0, walBytes: 0, walMaxBytes: 0, shmBytes: 0, cacheBytes: 0 }
+  const out = {
+    dbBytes: 0, walBytes: 0, walMaxBytes: 0, shmBytes: 0,
+    stageBytes: 0, stageMaxBytes: 0,
+    cacheBytes: 0,
+  }
   if (!existsSync(cacheDir)) return out
   const walk = (dirIn) => {
     for (const entry of readdirSync(dirIn, { withFileTypes: true })) {
@@ -193,6 +229,10 @@ function snapshotCache(cacheDir) {
         out.walBytes += size
         out.walMaxBytes = Math.max(out.walMaxBytes, size)
       } else if (p.endsWith('-shm')) out.shmBytes += size
+      else if (p.includes('.stage.')) {
+        out.stageBytes += size
+        out.stageMaxBytes = Math.max(out.stageMaxBytes, size)
+      }
     }
   }
   walk(cacheDir)
@@ -226,11 +266,24 @@ async function main() {
     console.error(line)
     appendFileSync(eventsFile, `${line}\n`)
   }
-  const call = (tool, args, timeoutMs = 600_000) => cbm.call(tool, args, { timeoutMs })
+  const call = async (tool, args, timeoutMs = 600_000) => {
+    ctx.m.inFlight += 1
+    try {
+      return await cbm.call(tool, args, { timeoutMs })
+    } finally {
+      ctx.m.inFlight -= 1
+    }
+  }
 
   const fleet = cloneFleet({ fleetDir: cfg.fleetDir, repoCount: cfg.repoCount, log })
   const cacheDir = join(cfg.outDir, 'cache')
-  const cbm = new CbmSupervisor({ cacheDir, logger: { info: () => {}, warn: (m) => log(`cbm-warn: ${m}`), error: (m) => log(`cbm-err: ${m}`) } })
+  // CBM's stderr diagnostics (spawn errors, cache-dir conflicts — the exact
+  // root cause of "child exit 1" failures) arrive on logger.info; dropping
+  // them (the old `info: () => {}`) hid the #1 diagnosis from events.log.
+  const cbm = new CbmSupervisor({
+    cacheDir,
+    logger: { info: (m) => log(`cbm: ${m}`), warn: (m) => log(`cbm-warn: ${m}`), error: (m) => log(`cbm-err: ${m}`) },
+  })
 
   const ctx = {
     stopped: false,
@@ -245,15 +298,25 @@ async function main() {
       indexOk: 0, indexErr: 0, queryOk: 0, queryErr: 0,
       indexMs: [], queryMs: [],           // rolling per sample window
       indexMsAll: [], queryMsAll: [],     // full-run for the report
-      daemonRestarts: 0,
+      daemonRestarts: 0, childRestarts: 0,
+      inFlight: 0,
     },
     lastDaemonPid: null,
+    lastChildPid: null,
   }
 
+  // First signal drains (bounded by the in-flight call timeouts); a second
+  // one force-exits — a wedged CBM (the #1955/#2107 failure mode this soak
+  // hunts) must not turn Ctrl-C into a 10-minute hang with no escalation.
+  let signalCount = 0
   const stop = (signal) => {
-    if (ctx.stopped) return
+    signalCount += 1
+    if (signalCount > 1) {
+      log(`${signal} again — forcing immediate exit (${ctx.m.inFlight} in-flight CBM calls abandoned)`)
+      process.exit(1)
+    }
     ctx.stopped = true
-    log(`received ${signal} — draining`)
+    log(`received ${signal} — draining (${ctx.m.inFlight} in-flight CBM calls)`)
   }
   process.on('SIGINT', () => stop('SIGINT'))
   process.on('SIGTERM', () => stop('SIGTERM'))
@@ -303,6 +366,14 @@ async function main() {
           }
         }),
       )
+      // A whole round with zero successes is systemic (daemon cache-dir
+      // conflict, broken binary), not soak signal — burning the remaining
+      // duration on it would produce a 24 h all-error report.
+      if (ctx.m.indexOk === 0) {
+        log(`FATAL: round ${round} completed with zero successful indexes (${ctx.m.indexErr} failed) — see cbm: lines above for the root cause`)
+        stop('all-indexes-failed')
+        return
+      }
       await sleepUnlessStopped(cfg.indexIntervalMs)
     }
   }
@@ -339,13 +410,19 @@ async function main() {
   function sampleOnce() {
     const cache = snapshotCache(cacheDir)
     const binaryPath = resolveCbmBinary()
-    const procs = snapshotProcs(binaryPath)
+    const procs = snapshotProcs(binaryPath, cacheDir)
     if (procs.daemonPid !== null && ctx.lastDaemonPid !== null && procs.daemonPid !== ctx.lastDaemonPid) {
       ctx.m.daemonRestarts += 1
       log(`DAEMON RESTART: pid ${ctx.lastDaemonPid} -> ${procs.daemonPid}`)
     }
     if (procs.daemonPid !== null) ctx.lastDaemonPid = procs.daemonPid
-    const p95 = percentile([...ctx.m.queryMs].sort((a, b) => a - b), 95)
+    if (procs.childPid !== null && ctx.lastChildPid !== null && procs.childPid !== ctx.lastChildPid) {
+      ctx.m.childRestarts += 1
+      log(`CBM STDIO CHILD RESPAWNED: pid ${ctx.lastChildPid} -> ${procs.childPid}`)
+    }
+    if (procs.childPid !== null) ctx.lastChildPid = procs.childPid
+    const q95 = percentile([...ctx.m.queryMs].sort((a, b) => a - b), 95)
+    const i95 = percentile([...ctx.m.indexMs].sort((a, b) => a - b), 95)
     const row = {
       t: new Date().toISOString(),
       elapsedMs: Date.now() - ctx.t0,
@@ -353,14 +430,16 @@ async function main() {
       ...procs,
       indexOk: ctx.m.indexOk, indexErr: ctx.m.indexErr,
       queryOk: ctx.m.queryOk, queryErr: ctx.m.queryErr,
-      queryP95WindowMs: p95 === null ? null : Math.round(p95),
+      queryP95WindowMs: q95 === null ? null : Math.round(q95),
+      indexP95WindowMs: i95 === null ? null : Math.round(i95),
     }
     appendFileSync(samplesFile, `${JSON.stringify(row)}\n`)
     ctx.m.indexMs = []
     ctx.m.queryMs = []
     log(
-      `sample: wal=${(cache.walBytes / 1e6).toFixed(1)}MB max=${(cache.walMaxBytes / 1e6).toFixed(1)}MB ` +
-        `cache=${(cache.cacheBytes / 1e6).toFixed(1)}MB daemon=${procs.daemonPid ?? 'GONE'}@${procs.daemonRssKb ?? '?'}KB ` +
+      `sample: db=${(cache.dbBytes / 1e6).toFixed(1)}MB stage=${(cache.stageBytes / 1e6).toFixed(1)}MB(max ${(cache.stageMaxBytes / 1e6).toFixed(1)}) ` +
+        `wal=${(cache.walBytes / 1e6).toFixed(1)}MB cache=${(cache.cacheBytes / 1e6).toFixed(1)}MB ` +
+        `daemon=${procs.daemonPid ?? 'UNATTRIBUTED'}@${procs.daemonRssKb ?? '?'}KB workers=${procs.indexWorkers}@${(procs.indexWorkersRssKb / 1024).toFixed(0)}MB ` +
         `idx=${ctx.m.indexOk}/${ctx.m.indexErr} q=${ctx.m.queryOk}/${ctx.m.queryErr}`,
     )
   }
@@ -380,6 +459,18 @@ async function main() {
   let report = null
   try {
     log(`soak start: ${cfg.repoCount} repos, duration=${Math.round(cfg.durationMs / 60000)}min, indexConcurrency=${cfg.indexConcurrency}, queryClients=${cfg.queryClients}, out=${cfg.outDir}`)
+    // Pre-flight: CBM's account-level daemon binds ONE cache dir for the
+    // whole user — any other live CBM session (another baize, an editor MCP)
+    // makes every call here fail with "active account daemon uses a
+    // different cache directory". Fail BEFORE burning the duration, with the
+    // root cause in the log (the CbmSupervisor prints it on child stderr).
+    try {
+      await call('list_projects', {}, 120_000)
+      log('pre-flight: CBM responsive')
+    } catch (err) {
+      log(`FATAL: CBM pre-flight failed — another CBM session with a different cache dir is likely active on this machine: ${err.message}`)
+      stop('preflight-failed')
+    }
     samplerTimer = setTimeout(sampler, cfg.sampleIntervalMs)
     await Promise.all([indexLoop(), ...Array.from({ length: cfg.queryClients }, () => queryClient())])
   } finally {
@@ -398,7 +489,9 @@ async function main() {
     log(`report written: ${join(cfg.outDir, 'report.json')}`)
     log(
       `summary: indexOk=${report.index.ok} indexErr=${report.index.err} queryOk=${report.query.ok} queryErr=${report.query.err} ` +
-        `maxWalMB=${(report.wal.maxTotalBytes / 1e6).toFixed(1)} daemonRestarts=${report.daemon.restarts}`,
+        `maxStageMB=${(report.stage.maxTotalBytes / 1e6).toFixed(1)} maxWalMB=${(report.wal.maxTotalBytes / 1e6).toFixed(1)} ` +
+        `dbMB=${(report.db.finalBytes / 1e6).toFixed(1)} daemonRestarts=${report.daemon.restarts} childRestarts=${report.daemon.childRestarts} ` +
+        `maxIndexWorkers=${report.indexWorkers.maxConcurrent}`,
     )
     // The unindexed tail is a loud failure, not a footnote: a repo that never
     // completed a single index round makes every other number meaningless.
@@ -420,6 +513,13 @@ function buildReport(cfg, ctx, fleet) {
     : []
   const maxOf = (k) => samples.reduce((m, s) => Math.max(m, s[k] ?? 0), 0)
   const daemonRss = samples.filter((s) => s.daemonRssKb !== null).map((s) => s.daemonRssKb)
+  // CBM 0.10.8 writes via stage-and-rename: a run with indexes but zero WAL
+  // bytes must not be read as "no growth" — the growth signal is the stage
+  // totals and per-round .db deltas (see snapshotCache).
+  const walNote =
+    ctx.m.indexOk > 0 && maxOf('walBytes') === 0
+      ? 'no -wal files observed across the run despite active indexing — CBM 0.10.8 writes via stage-and-rename; watch stage.* totals and db growth instead'
+      : null
   return {
     config: {
       durationMs: cfg.durationMs,
@@ -436,6 +536,16 @@ function buildReport(cfg, ctx, fleet) {
       maxTotalBytes: maxOf('walBytes'),
       maxSingleBytes: maxOf('walMaxBytes'),
       finalTotalBytes: samples.at(-1)?.walBytes ?? 0,
+      note: walNote,
+    },
+    stage: {
+      maxTotalBytes: maxOf('stageBytes'),
+      maxSingleBytes: maxOf('stageMaxBytes'),
+      finalTotalBytes: samples.at(-1)?.stageBytes ?? 0,
+    },
+    db: {
+      maxBytes: maxOf('dbBytes'),
+      finalBytes: samples.at(-1)?.dbBytes ?? 0,
     },
     cache: {
       maxBytes: maxOf('cacheBytes'),
@@ -443,12 +553,17 @@ function buildReport(cfg, ctx, fleet) {
     },
     daemon: {
       restarts: ctx.m.daemonRestarts,
+      childRestarts: ctx.m.childRestarts,
       // first/mid/last shows the RSS trend — the #581 slow-leak signal.
       rssKbFirst: daemonRss[0] ?? null,
       rssKbMid: daemonRss[Math.floor(daemonRss.length / 2)] ?? null,
       rssKbLast: daemonRss.at(-1) ?? null,
       rssKbMax: daemonRss.length ? Math.max(...daemonRss) : null,
       missingSamples: samples.filter((s) => s.daemonPid === null).length,
+    },
+    indexWorkers: {
+      maxConcurrent: maxOf('indexWorkers'),
+      maxRssKb: maxOf('indexWorkersRssKb'),
     },
     index: {
       ok: ctx.m.indexOk,

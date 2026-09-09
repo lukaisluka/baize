@@ -31,8 +31,13 @@ export function isValidRemoteUrl(url) {
   if (!/^[\x21-\x7E]+$/.test(url)) return false
   if (/^(?:https?|ssh|git):\/\/\S+$/i.test(url)) {
     // git itself refuses dash-leading hostnames (option smuggling); refuse
-    // them here too so the defense does not hinge on the git version.
-    return !url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').startsWith('-')
+    // them here too so the defense does not hinge on the git version. Check
+    // the percent-DECODED form — %2D is a dash.
+    let rest = url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+    try {
+      rest = decodeURIComponent(rest)
+    } catch { /* malformed % sequence — the raw form is checked below */ }
+    return !rest.startsWith('-')
   }
   // scp style — what GitLab's ssh_url_to_repo looks like: git@host:group/proj.git
   return /^[A-Za-z0-9][A-Za-z0-9._-]*@\S+:\S+$/.test(url)

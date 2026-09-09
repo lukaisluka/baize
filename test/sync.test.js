@@ -90,8 +90,9 @@ describe('remote URL allowlist', () => {
     assert.equal(isValidRemoteUrl('ssh://git@host/repo\0evil'), false)
     assert.equal(isValidRemoteUrl('https://host/\x01x'), false)
     // git blocks dash-leading hostnames itself; refuse them independently of
-    // the installed git version.
+    // the installed git version — including the percent-encoded form.
     assert.equal(isValidRemoteUrl('ssh://-oProxyCommand=evil/x'), false)
+    assert.equal(isValidRemoteUrl('ssh://%2Devil/x'), false)
   })
 
   test('engine refuses to clone rejected URLs and leaves no repos dir', { timeout: 60000 }, async () => {

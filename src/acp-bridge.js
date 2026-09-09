@@ -54,7 +54,38 @@ function killChild(child, logger) {
 // frames become stdin lines, stdout lines become frames (never byte-passthrough
 // — one TCP read can straddle a message boundary), non-JSON stdout lines are
 // dropped+logged, and either side dying tears down the other.
-export function createAcpBridge({ server, home, agentCommand = 'omp', logger }) {
+//
+// Two baize-owned injections ride on that pipe (#10):
+// - `prepareWorkspace` (optional) runs before each spawn to lay out the
+//   agent's project dir (fleet listing). It must never reject — a broken
+//   workspace degrades the agent, it must not kill the chat.
+// - `agentMcpServers` (optional) supplies ACP mcpServer descriptors that are
+//   merged into session/new|load|resume requests. OMP's ACP mode does not
+//   load project .omp/mcp.json (verified live against 18.1.15), so the ACP
+//   wire channel is how baize hands the code index to the agent. A server
+//   the client itself declared always wins by name.
+const SESSION_METHODS_WITH_MCP = new Set(['session/new', 'session/load', 'session/resume'])
+
+function injectMcpServers(raw, agentMcpServers, logger) {
+  let msg
+  try {
+    msg = JSON.parse(raw)
+  } catch {
+    return raw
+  }
+  if (!msg || typeof msg.method !== 'string' || !SESSION_METHODS_WITH_MCP.has(msg.method)) return raw
+  let servers = agentMcpServers()
+  if (!Array.isArray(servers) || servers.length === 0) return raw
+  const declared = Array.isArray(msg.params?.mcpServers) ? msg.params.mcpServers : []
+  const declaredNames = new Set(declared.map((s) => s?.name))
+  servers = servers.filter((s) => !declaredNames.has(s.name))
+  if (servers.length === 0) return raw
+  const out = { ...msg, params: { ...msg.params, mcpServers: [...declared, ...servers] } }
+  logger?.info(`acp-bridge: injected MCP servers into ${msg.method}: ${servers.map((s) => s.name).join(', ')}`)
+  return JSON.stringify(out)
+}
+
+export function createAcpBridge({ server, home, agentCommand = 'omp', logger, prepareWorkspace, agentMcpServers }) {
   const children = new Set()
   const overlayPath = join(home, 'omp-overlay.yml')
   const agentCwd = join(home, 'agent')
@@ -97,7 +128,14 @@ export function createAcpBridge({ server, home, agentCommand = 'omp', logger }) 
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req))
   })
 
-  wss.on('connection', (socket) => {
+  wss.on('connection', async (socket) => {
+    if (prepareWorkspace) {
+      try {
+        prepareWorkspace()
+      } catch (err) {
+        logger?.warn(`acp-bridge: agent workspace preparation failed (agent starts degraded): ${err?.message ?? err}`)
+      }
+    }
     let child
     try {
       const { cmd, args, cwd } = agentArgs()
@@ -130,7 +168,15 @@ export function createAcpBridge({ server, home, agentCommand = 'omp', logger }) 
 
     socket.on('message', (data, isBinary) => {
       if (!isBinary && child.stdin && !child.stdin.destroyed) {
-        child.stdin.write(`${data.toString('utf8')}\n`)
+        let line = data.toString('utf8')
+        if (agentMcpServers) {
+          try {
+            line = injectMcpServers(line, agentMcpServers, logger)
+          } catch (err) {
+            logger?.warn(`acp-bridge: MCP injection skipped (${err?.message ?? err}) — forwarding verbatim`)
+          }
+        }
+        child.stdin.write(`${line}\n`)
       }
     })
 

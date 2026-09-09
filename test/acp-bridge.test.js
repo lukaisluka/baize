@@ -197,3 +197,91 @@ test('agent stdout split across TCP reads yields intact separate frames', { time
     ws.close()
   }
 })
+
+// The #10 wiring: workspace preparation runs before each spawn, and a broken
+// preparation degrades (logged) instead of killing the chat connection.
+test('prepareWorkspace runs per connection and its failure does not block spawn', { timeout: 20000 }, async () => {
+  let prepared = 0
+  const out = { wired: true }
+  const failHome = tempHome()
+  const failServer = createServer((req, res) => res.writeHead(404).end())
+  const failBridge = createAcpBridge({
+    server: failServer,
+    home: failHome,
+    agentCommand: `node ${FAKE_AGENT}`,
+    logger,
+    prepareWorkspace: () => {
+      prepared += 1
+      if (prepared === 1) return out.wired // success path
+      throw new Error('disk on fire')
+    },
+  })
+  const failBound = await listen(failServer, { port: 0 })
+  try {
+    const first = await connect(`ws://${failBound.host}:${failBound.port}/acp`)
+    const reply = await request(first, 'initialize')
+    assert.equal(reply.result.agentInfo.name, 'fake-agent')
+    first.close()
+    await new Promise((resolve) => {
+      const check = () => (failBridge.activeChildren() === 0 ? resolve() : setTimeout(check, 100))
+      check()
+    })
+
+    const second = await connect(`ws://${failBound.host}:${failBound.port}/acp`)
+    const secondReply = await request(second, 'initialize')
+    assert.equal(secondReply.result.agentInfo.name, 'fake-agent', 'throwing prepare does not block the agent')
+    second.close()
+    assert.equal(prepared, 2, 'preparation ran once per connection')
+  } finally {
+    await failBridge.stop()
+    await close(failServer)
+    cleanupHome(failHome)
+  }
+})
+
+// The #10 MCP wiring: baize's servers are injected into session/* requests on
+// the wire (OMP's ACP mode ignores project .omp/mcp.json — this is the only
+// channel), and anything the client itself declared wins by name.
+test('agentMcpServers are injected into session/new; client-declared servers win', { timeout: 20000 }, async () => {
+  const mcpHome = tempHome()
+  const mcpServer = createServer((req, res) => res.writeHead(404).end())
+  const mine = () => [
+    { name: 'codebase-memory', command: '/cbm', args: ['--ui=false'], env: [{ name: 'CBM_CACHE_DIR', value: '/idx' }] },
+    { name: 'extra', command: '/extra' },
+  ]
+  const mcpBridge = createAcpBridge({
+    server: mcpServer,
+    home: mcpHome,
+    agentCommand: `node ${FAKE_AGENT}`,
+    logger,
+    agentMcpServers: mine,
+  })
+  const mcpBound = await listen(mcpServer, { port: 0 })
+  try {
+    const ws = await connect(`ws://${mcpBound.host}:${mcpBound.port}/acp`)
+    const withOwn = await request(ws, 'session/new', {
+      cwd: '/x',
+      mcpServers: [{ name: 'codebase-memory', command: '/client-declared' }],
+    })
+    assert.deepEqual(
+      withOwn.result.params.mcpServers,
+      [
+        { name: 'codebase-memory', command: '/client-declared' }, // client's wins
+        { name: 'extra', command: '/extra' }, // baize's others still ride along
+      ],
+      'codebase-memory clash resolved to the client declaration',
+    )
+
+    const fresh = await request(ws, 'session/new', { cwd: '/x' })
+    assert.deepEqual(fresh.result.params.mcpServers, mine(), 'without client servers both are injected')
+    assert.equal(fresh.result.params.cwd, '/x', 'other params untouched')
+
+    const nonSession = await request(ws, 'session/prompt', { prompt: [] })
+    assert.equal(nonSession.result.params.mcpServers, undefined, 'non-session methods pass through untouched')
+    ws.close()
+  } finally {
+    await mcpBridge.stop()
+    await close(mcpServer)
+    cleanupHome(mcpHome)
+  }
+})

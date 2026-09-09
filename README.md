@@ -65,6 +65,21 @@ Telemetry is off by default: BaiZe spawns OMP with
 the startup update check, and strips all `OTEL_*` variables from the
 agent's environment.
 
+The bridge gives the agent two things on every connection:
+
+- **CBM as a live tool server.** OMP's ACP mode ignores project-level
+  `.omp/mcp.json`, so the bridge injects the `codebase-memory` MCP server
+  (the bundled CBM binary, pointed at BaiZe's index cache) into the ACP
+  `session/new|load|resume` requests before they reach OMP. Client-declared
+  servers with the same name win.
+- **A generated `~/.baize/agent/AGENTS.md`** — the fleet listing (project
+  names, indexed revisions, worktree paths) plus the citation rules: answer
+  from the index, not memory; every factual claim carries a
+  `<project>/<path>:<line>` citation; say so when the index has nothing.
+
+The chat UI marks the converse: a finished turn whose answer cites no tool
+evidence at all shows a trailing "unverified" notice.
+
 ## Repos & code index
 
 Point the server at a local git repository (work tree or bare mirror) —
@@ -103,7 +118,7 @@ All state lives under `~/.baize/` (override with `BAIZE_HOME`):
 ~/.baize/
 ├── config.json      # GitLab URL + PAT (chmod 600), poll interval, branch overrides; agentCommand here
 ├── omp-overlay.yml  # OMP telemetry opt-out, written once by baize (editable)
-├── agent/           # working directory for spawned agent processes
+├── agent/           # working directory for spawned agent processes; AGENTS.md regenerated per connection
 ├── repos/           # bare mirror clones kept current by fleet sync
 ├── worktrees/       # linked worktrees at tracked revisions — what gets indexed
 ├── index/           # CBM data (per-project SQLite DBs)

@@ -146,7 +146,7 @@ baize CLI — single Node.js process (`npx baize`), binds 127.0.0.1 only
 **baize CLI (orchestrator)**
 
 - Serves the UI; bridges ACP (WebSocket ↔ stdio)
-- Spawns and supervises OMP; wires OMP's MCP configuration to CBM
+- Spawns and supervises OMP; injects CBM into the agent's ACP session (`mcpServers` on session/new|load|resume — see §17 item 1 note) and regenerates the workspace `AGENTS.md` (fleet listing + citation rules) per connection
 - Runs the fleet worker (§7)
 - Exposes the management API to the UI
 
@@ -282,6 +282,8 @@ Every material answer should include enough evidence to verify it:
 - repository, branch/revision where possible,
 - file path, line range, symbol,
 - related graph edge or dependency.
+
+The UI enforces the converse visibly (issue #10): a settled turn whose answer cites no tool evidence at all — no tool_call block in the turn — renders a trailing "unverified" notice, so an unsupported answer never reads as grounded.
 
 ### 8.4 Change Impact Analysis
 
@@ -503,6 +505,8 @@ Each item has a pass criterion; failure triggers a documented fallback decision 
 | 1 | **Distribution/runtime**: CBM's static binary (npm postinstall, confirmed) and OMP can both be spawned and supervised by the baize CLI — incl. CBM daemon lifecycle ownership and OMP's own runtime requirement (Bun vs prebuilt binary, confirmed — see note below) | Clean-machine test: Node + git only | `npx baize` indexes a repo and answers a question end-to-end (exercises OMP spawn + CBM spawn + UI); offline/locked-down install path via pre-bundled or mirrored binaries documented |
 
 > **OMP runtime — confirmed (issue #9)**: OMP v18.1.15 is a Bun script (`#!/usr/bin/env bun`, requires `bun >= 1.3.14`), distributed as the npm package `@oh-my-pi/pi-coding-agent` (binary `omp`). BaiZe spawns it as `omp --mode=acp --config ~/.baize/omp-overlay.yml` — `--mode=acp` is an undocumented-but-standard ACP mode (JSON-RPC over stdio). The overlay disables the startup update check (`startup.checkUpdate: false`), and the bridge strips all `OTEL_*` variables from the child environment, so no telemetry egress by default. The clean-machine end-to-end item above remains open until exercised on a fresh host.
+>
+> **MCP wiring — confirmed (issue #10)**: OMP's ACP mode does **not** load project-level `.omp/mcp.json` (verified empirically: zero codebase-memory records in OMP logs; only the user-level `~/.omp/agent/mcp.json` is read, which BaiZe must not touch — it would pollute every OMP session on the host). The working channel is the ACP standard itself: `session/new` / `session/load` / `session/resume` accept an `mcpServers` parameter (per the ACP spec, each element's `env` is an array of `{name, value}` pairs, not an object). BaiZe's bridge injects the CBM server (binary from `node_modules`, `--ui=false`, `CBM_CACHE_DIR` pointed at the index cache) into those requests before forwarding; client-declared servers with the same name win. Verified end-to-end: the model discovers and calls `mcp__codebase-memory__*` tools and answers with file:line citations.
 | 2 | **Multi-repo store**: can one CBM instance hold multiple repositories with repo-scoped queries? | Index 20 repos into one store; run scoped and unscoped queries | Queries correctly scope by repo; no cross-contamination of results |
 | 3 | **Cross-repo relationships**: quantify CBM's `cross-repo-intelligence` mode per relationship type — HTTP routes, gRPC, GraphQL, async topics (**Kafka explicitly; upstream matching is partial**), proto imports | Index 3–5 repos with known cross-repo links; run `index_repository` in `cross-repo-intelligence` mode with `target_projects`; query for each known link | Hit-rate **and false-positive rate** per relationship type recorded (upstream has both failure modes: #523 misses, #1459 false positives); thresholds set at first run — the numbers themselves are the deliverable |
 | 4 | **Incremental indexing**: does a push trigger index update without full re-index? | Push a representative commit; measure latency and changed-work scope | Incremental latency in seconds-to-minutes; no full re-index |

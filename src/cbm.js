@@ -64,6 +64,17 @@ export class CbmSupervisor {
     return (this.binaryPath ??= this.requestedBinaryPath ?? resolveCbmBinary())
   }
 
+  /** The binary path if it can be resolved right now, else null. Callers that
+   * only want to wire other processes to the same binary (e.g. the agent
+   * workspace) must not crash when the download failed — they degrade. */
+  binaryPathOrNull() {
+    try {
+      return this.#binaryPath()
+    } catch {
+      return null
+    }
+  }
+
   async ensure() {
     if (this.child && this.child.exitCode === null && this.ready) return this.ready
     this.stopping = false

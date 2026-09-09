@@ -89,7 +89,10 @@ test('add(): re-submitting a registered path returns the existing entry, no dupl
     const fixture = gitFixture(join(home, 'svc'))
     const first = registry.add(fixture)
     const second = registry.add(fixture, 'other-name')
+    // Trailing slash normalizes to the same entry too.
+    const third = registry.add(`${fixture}/`)
     assert.equal(second.name, first.name)
+    assert.equal(third.name, first.name)
     assert.equal(second.alreadyRegistered, true)
     assert.deepEqual(Object.keys(config.repos), [first.name])
   } finally {

@@ -157,7 +157,7 @@ function readJsonBody(req) {
 // baize index arbitrary local paths, and DNS rebinding can forge the Host.
 // Require an explicit local Host and, for writes, a JSON content-type.
 function isLocalHostHeader(host) {
-  return /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host ?? '')
+  return /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(host ?? '')
 }
 
 async function handleApi(req, res, path, { registry }) {
@@ -183,7 +183,7 @@ async function handleApi(req, res, path, { registry }) {
       return sendJson(res, 400, { error: 'field "path" (absolute git repo path) is required' })
     }
     const added = registry.add(body.path, body.name)
-    return sendJson(res, 201, added)
+    return sendJson(res, added.alreadyRegistered ? 200 : 201, added)
   }
 
   return sendJson(res, 404, { error: 'not found' })

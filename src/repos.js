@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { basename, isAbsolute, resolve } from 'node:path'
+import { basename, resolve } from 'node:path'
 
 function slugify(path) {
   return (
@@ -73,9 +73,11 @@ export function createRepoRegistry({ config, save, logger, cbm }) {
   }
 
   function add(rawPath, rawName) {
-    const path = isAbsolute(rawPath) ? rawPath : resolve(rawPath)
-    // Re-submitting a path already registered is a no-op returning the
-    // existing entry — never a second registry entry indexing the same tree.
+    // resolve() normalizes (absolute, no trailing slash) so the same repo
+    // submitted as /x/repo and /x/repo/ dedupes to one registry entry.
+    const path = resolve(rawPath)
+    // Re-submitting a registered path returns the existing entry and re-kicks
+    // indexing if idle — never a second entry indexing the same tree.
     const existing = Object.entries(config.repos).find(([, entry]) => entry.path === path)
     if (existing) {
       const [name] = existing

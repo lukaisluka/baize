@@ -91,10 +91,16 @@ export class CbmSupervisor {
         if (line.trim()) this.logger?.info(`cbm: ${line}`)
       }
     })
-    child.on('exit', (code, signal) => this.#onExit(code, signal))
+    child.on('exit', (code, signal) => {
+      // A replaced child (handshake failure → respawn) can exit late; its
+      // exit must not clobber the state of the child that replaced it.
+      if (child !== this.child) return
+      this.#onExit(code, signal)
+    })
     // Spawn failures (EACCES/ENOENT race/ENOEXEC) fire 'error', not 'exit' —
     // without this listener they would crash the whole baize process.
     child.on('error', (err) => {
+      if (child !== this.child) return
       this.logger?.error(`cbm: spawn/stream error: ${err.message}`)
       this.#onExit(err.code ?? '?', null)
     })

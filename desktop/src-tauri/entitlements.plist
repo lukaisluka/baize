@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- PRD §6.5 / #18: the sidecar is a plain Node binary, and Node's V8
+       needs JIT under a hardened runtime. Entitlements attach to the shell
+       executable; child processes (the Node sidecar, and its own children:
+       OMP/Bun, CBM) inherit the relaxed flags, which is exactly the
+       mechanism Apple documents for JIT runtimes spawned by a hardened app. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <!-- V8's write-protected code / wasm code space on some Node versions;
+    harmless when unused, fatal when needed. -->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+</dict>
+</plist>

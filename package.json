@@ -20,5 +20,8 @@
   "scripts": {
     "start": "node src/cli.js",
     "test": "node --test"
+  },
+  "dependencies": {
+    "codebase-memory-mcp": "0.10.8"
   }
 }

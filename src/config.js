@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 
 // Defaults are forward-shaped for the fleet work (#11, #12): gitlab.baseUrl /
@@ -46,4 +46,14 @@ export function loadConfig(home) {
   chmodSync(file, 0o600)
 
   return { ...copyDefaults(), ...parsed }
+}
+
+// Atomic (temp + rename) so a crash mid-write can never truncate the config;
+// 0600 is re-asserted since the file carries the GitLab PAT (§7.2).
+export function saveConfig(home, config) {
+  const file = configPath(home)
+  const tmp = `${file}.tmp-${process.pid}`
+  writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 })
+  chmodSync(tmp, 0o600)
+  renameSync(tmp, file)
 }

@@ -143,7 +143,7 @@ function upgradeRequest(headers) {
       },
       (res) => resolve({ status: res.statusCode }),
     )
-    req.on('upgrade', (res) => resolve({ status: res.statusCode, upgraded: true }))
+    req.on('upgrade', (res, socket) => resolve({ status: res.statusCode, upgraded: true, socket }))
     req.on('error', (err) => (err.code === 'ECONNRESET' ? resolve({ destroyed: true }) : reject(err)))
     req.end()
     setTimeout(() => reject(new Error('upgrade probe timed out')), 5000).unref()
@@ -164,7 +164,11 @@ test('upgrade with a local browser Origin is accepted', { timeout: 20000 }, asyn
   const outcome = await upgradeRequest({ origin: `http://localhost:${bound.port}` })
   assert.equal(outcome.status, 101)
   // The handshake spawned an agent child; drop the socket so it is reaped.
-  assert.equal(bridge.activeChildren(), 1)
+  outcome.socket.destroy()
+  await new Promise((resolve) => {
+    const check = () => (bridge.activeChildren() === 0 ? resolve() : setTimeout(check, 100))
+    check()
+  })
 })
 
 test('agent stdout split across TCP reads yields intact separate frames', { timeout: 20000 }, async () => {

@@ -22,7 +22,7 @@ upstream fixes is manual until a shared package is justified.
 | `dist/`         | Build output (rebuilt here)                                 |
 | workspace files | `pnpm-workspace.yaml`, `pnpm-lock.yaml` — baize uses npm workspaces |
 | `.github/`       | Panda's own CI (pages deploy, desktop builds) — inert inside `ui/` and misleading; baize CI lives at the repo root |
-| top-level md    | Panda's README/CONTEXT/DESIGN/CHANGELOG stay upstream       |
+| top-level md    | Panda's README/CONTEXT/DESIGN/CHANGELOG/AGENTS stay upstream |
 
 ## Local modifications
 

@@ -101,3 +101,10 @@ Scoring notes:
   (the system failed the question), not a scoring bug.
 - The leakage check compares against the *registered* fleet from
   `/api/repos`; a repo still mid-indexing counts as in-fleet.
+
+## Cross-repo relationship measurement (issue #14)
+
+A separate harness lives in [`crossrepo/`](./crossrepo/) — it measures the
+CBM engine itself (cross-repo edge hit rate / false positives against a
+known-ground-truth fixture fleet) rather than answer quality. Results and
+method: [`crossrepo/README.md`](./crossrepo/README.md).

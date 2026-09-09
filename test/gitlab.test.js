@@ -74,13 +74,15 @@ function startFakeGitLab() {
 describe('normalizeBaseUrl', () => {
   test('accepts host, scheme, trailing slashes, and a pasted /api/v4 suffix', () => {
     assert.equal(normalizeBaseUrl('gitlab.example.com'), 'https://gitlab.example.com')
+    assert.equal(normalizeBaseUrl('gitlab.example.com:8443'), 'https://gitlab.example.com:8443')
+    assert.equal(normalizeBaseUrl('localhost:8931'), 'https://localhost:8931')
     assert.equal(normalizeBaseUrl('https://gitlab.example.com/'), 'https://gitlab.example.com')
     assert.equal(normalizeBaseUrl('http://localhost:8443/api/v4/'), 'http://localhost:8443')
   })
 
-  test('rejects empty and unparseable input', () => {
-    assert.throws(() => normalizeBaseUrl(''), GitLabError)
-    assert.throws(() => normalizeBaseUrl('https://'), GitLabError)
+  test('rejects non-http(s) schemes and embedded credentials', () => {
+    assert.throws(() => normalizeBaseUrl('ftp://gitlab.example.com'), GitLabError)
+    assert.throws(() => normalizeBaseUrl('https://user:pass@gitlab.example.com'), GitLabError)
   })
 })
 

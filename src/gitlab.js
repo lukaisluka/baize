@@ -27,8 +27,11 @@ export function normalizeBaseUrl(raw) {
   let url = String(raw ?? '').trim()
   if (!url) throw new GitLabError('GitLab base URL is required', 'GITLAB_BAD_REQUEST', 400)
   // Only prefix when there is no scheme at all — a non-http(s) scheme must be
-  // rejected below, not silently mangled into "https://ftp://…".
-  if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) url = `https://${url}`
+  // rejected below, not silently mangled into "https://ftp://…". Requiring
+  // "//" keeps bare host:port inputs ("gitlab.example.com:8443") out of the
+  // scheme match — the dot in the scheme charset would otherwise swallow the
+  // colon and reject a common self-hosted paste.
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) url = `https://${url}`
   let parsed
   try {
     parsed = new URL(url)
@@ -93,6 +96,17 @@ export function createGitLabClient({ baseUrl, token, fetchImpl = fetch, logger }
     throw new GitLabError(`GitLab API error ${status} on ${path.split('?')[0]}`, 'GITLAB_API_ERROR', 502)
   }
 
+  // GET returning JSON — a 200 that isn't JSON (captive portals, proxies)
+  // becomes a clean GitLabError instead of a bare SyntaxError 500.
+  async function requestJson(path) {
+    const response = await request(path)
+    try {
+      return await response.json()
+    } catch {
+      throw new GitLabError('GitLab returned a non-JSON response (proxy or HTML page?)', 'GITLAB_API_ERROR', 502)
+    }
+  }
+
   // Keyset pagination (order_by=id&sort=asc is required for keyset; the API
   // signals the next page via the Link header and an id_after cursor).
   async function paged(path) {
@@ -101,7 +115,12 @@ export function createGitLabClient({ baseUrl, token, fetchImpl = fetch, logger }
     const items = []
     for (let page = 0; page < MAX_PAGES; page += 1) {
       const response = await request(query)
-      const batch = await response.json()
+      let batch
+      try {
+        batch = await response.json()
+      } catch {
+        throw new GitLabError('GitLab returned a non-JSON response (proxy or HTML page?)', 'GITLAB_API_ERROR', 502)
+      }
       if (!Array.isArray(batch)) {
         throw new GitLabError('GitLab returned a non-list response (proxy or HTML page?)', 'GITLAB_API_ERROR', 502)
       }
@@ -129,7 +148,7 @@ export function createGitLabClient({ baseUrl, token, fetchImpl = fetch, logger }
   return {
     baseUrl: root,
     async verifyToken() {
-      const user = await (await request('/user')).json()
+      const user = await requestJson('/user')
       return { username: user.username }
     },
     async discoverGroup(groupPath) {
@@ -143,7 +162,7 @@ export function createGitLabClient({ baseUrl, token, fetchImpl = fetch, logger }
       const missing = []
       for (const entry of paths) {
         try {
-          const project = await (await request(`/projects/${encodePathSegment(entry)}`)).json()
+          const project = await requestJson(`/projects/${encodePathSegment(entry)}`)
           repos.push(toRepo(project))
         } catch (err) {
           if (err.code === 'GITLAB_NOT_FOUND') missing.push(entry)

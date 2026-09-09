@@ -28,8 +28,13 @@ The process binds 127.0.0.1 only and runs in the foreground; Ctrl-C stops it.
   WebSocket to `/acp` on this server. Each WebSocket connection spawns one
   agent child process; the bridge frames WebSocket messages to stdio
   JSON-RPC lines and back. Closing the tab terminates the agent.
-- **`/fleet`** — indexed-repository status.
-- **`/api/*`** — health and repo management (below).
+- **`/fleet`** — GitLab connection + repo discovery, and indexed-repository
+  status. Paste your GitLab base URL and a PAT (`read_api` scope is enough),
+  then discover a group recursively or an explicit repo list. The token is
+  stored in `~/.baize/config.json` (0600), used only for GitLab API calls,
+  never echoed back to any UI or written to logs. Mirroring/sync of the
+  discovered repos is upcoming work.
+- **`/api/*`** — health, repos, and GitLab settings/discovery endpoints.
 
 ### Agent (OMP)
 

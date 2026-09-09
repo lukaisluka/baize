@@ -16,6 +16,20 @@ const registry = {
   ],
   add: () => ({ name: 'new', path: '/x/new' }),
 }
+const gitlab = {
+  getSettings: () => ({ baseUrl: 'https://gitlab.test', hasToken: true, selection: null }),
+  saveSettings: ({ baseUrl, token, selection }) => {
+    if (!baseUrl) throw Object.assign(new Error('field "baseUrl" is required'), { statusCode: 400, code: 'GITLAB_BAD_REQUEST' })
+    return { baseUrl, hasToken: Boolean(token), selection: selection ?? null }
+  },
+  verify: () => ({ username: 'luka' }),
+  discover: async (input) => {
+    if (input?.group === 'unauthorized') {
+      throw Object.assign(new Error('GitLab rejected the token (401)'), { statusCode: 401, code: 'GITLAB_UNAUTHORIZED' })
+    }
+    return { repos: [{ name: 'grp/a', defaultBranch: 'main', webUrl: 'https://gitlab.test/grp/a', archived: false }] }
+  },
+}
 
 // Fake SPA dist for static-serving tests.
 const distDir = join(home, 'ui-dist')
@@ -23,8 +37,8 @@ mkdirSync(join(distDir, 'assets'), { recursive: true })
 writeFileSync(join(distDir, 'index.html'), '<!doctype html><title>baize spa</title>')
 writeFileSync(join(distDir, 'assets', 'app.js'), 'console.log("spa")')
 
-const server = createBaizeServer({ logger, registry, uiDist: distDir })
-const noDistServer = createBaizeServer({ logger, registry, uiDist: join(home, 'no-dist') })
+const server = createBaizeServer({ logger, registry, gitlab, uiDist: distDir })
+const noDistServer = createBaizeServer({ logger, registry, gitlab, uiDist: join(home, 'no-dist') })
 const bound = await listen(server, { port: 0 })
 const noDistBound = await listen(noDistServer, { port: 0 })
 const base = `http://${bound.host}:${bound.port}`
@@ -162,6 +176,54 @@ test('HEAD is served like GET (health-checker compatibility)', async () => {
 test('malformed percent-encoding is a 400, not a 500', async () => {
   const res = await fetch(new URL('/%FF%FE%25', base))
   assert.equal(res.status, 400)
+})
+
+test('GET /api/gitlab/settings reports connection state without the token', async () => {
+  const res = await fetch(new URL('/api/gitlab/settings', base))
+  assert.equal(res.status, 200)
+  const body = await res.json()
+  assert.deepEqual(body, { baseUrl: 'https://gitlab.test', hasToken: true, selection: null })
+  assert.ok(!('token' in body), 'token must never echo')
+})
+
+test('POST /api/gitlab/settings without baseUrl is a 400', async () => {
+  const res = await fetch(new URL('/api/gitlab/settings', base), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  assert.equal(res.status, 400)
+})
+
+test('POST /api/gitlab/discover returns repos; a 401 carries its machine code for the UI prompt', async () => {
+  const ok = await fetch(new URL('/api/gitlab/discover', base), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ group: 'grp' }),
+  })
+  assert.equal(ok.status, 200)
+  assert.equal((await ok.json()).repos[0].name, 'grp/a')
+
+  const denied = await fetch(new URL('/api/gitlab/discover', base), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ group: 'unauthorized' }),
+  })
+  assert.equal(denied.status, 401)
+  const body = await denied.json()
+  assert.equal(body.code, 'GITLAB_UNAUTHORIZED')
+  assert.match(body.error, /token/)
+})
+
+test('POST /api/gitlab/verify reports the authenticated user (JSON gate applies)', async () => {
+  const bare = await fetch(new URL('/api/gitlab/verify', base), { method: 'POST' })
+  assert.equal(bare.status, 415, 'verify requires application/json like the other writes')
+
+  const res = await fetch(new URL('/api/gitlab/verify', base), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+  })
+  assert.deepEqual(await res.json(), { username: 'luka' })
 })
 
 test('unknown /api paths and non-GET unknown paths get a JSON 404', async () => {

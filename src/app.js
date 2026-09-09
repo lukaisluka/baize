@@ -6,6 +6,7 @@ import { openBrowser } from './open-browser.js'
 import { CbmSupervisor } from './cbm.js'
 import { createRepoRegistry } from './repos.js'
 import { createAcpBridge } from './acp-bridge.js'
+import { createGitLabService } from './gitlab.js'
 
 // The built SPA: BAIZE_UI_DIST overrides; otherwise ui/dist next to src/
 // (repo checkout) — the packed layout (dist/ui) arrives with publishing.
@@ -31,8 +32,9 @@ export async function startApp({
 
   const cbm = new CbmSupervisor({ cacheDir: dirs.index, logger })
   const registry = createRepoRegistry({ config, save: () => saveConfig(home, config), logger, cbm })
+  const gitlab = createGitLabService({ config, save: () => saveConfig(home, config), logger })
 
-  const server = createBaizeServer({ logger, registry, uiDist })
+  const server = createBaizeServer({ logger, registry, gitlab, uiDist })
   const bridge = createAcpBridge({
     server,
     home,

@@ -208,7 +208,7 @@ Fleet is part of the MVP, scoped down to a single-user GitLab deployment. The en
 
 ### 7.2 Credentials
 
-- **PAT** is used for GitLab API calls (discovery, metadata) only. Stored locally in `~/.baize/config.json` (chmod 600, plaintext acceptable in V0.1). **Hard rule: the PAT must never appear in logs or audit records.** Required scopes: `read_api` (TBC whether `read_repository` is needed given §7.3).
+- **PAT** is used for GitLab API calls (discovery, metadata) only. Stored locally in `~/.baize/config.json` (chmod 600, plaintext acceptable in V0.1). **Hard rule: the PAT must never appear in logs or audit records.** Required scopes: `read_api` — confirmed sufficient (issue #11): discovery uses only the REST v4 API, and clone/fetch never carries the PAT (§7.3), so `read_repository` is not needed.
 - Phase 1 deliberately does not harden credential storage further (no keychain integration).
 
 ### 7.3 Clone and fetch
@@ -538,7 +538,7 @@ Graph relationships can indirectly expose restricted repository information. _Mi
 
 ## 19. Open Questions
 
-Resolved in v0.2: deployment form (§3); repo onboarding (Fleet in MVP, §7); branch policy (default branch, per-repo override, §7.1); ACL in Personal form (credential delegation, §3.1); UI source (Panda-derived, §6.3). Resolved in v0.2.1: OMP identity (Oh My Pi, §5); desktop sidecar packaging path (§6.5). Resolved by #9: OMP runtime requirement (Bun script, spawned via `omp --mode=acp` with telemetry opted out — §17 item 1 note).
+Resolved in v0.2: deployment form (§3); repo onboarding (Fleet in MVP, §7); branch policy (default branch, per-repo override, §7.1); ACL in Personal form (credential delegation, §3.1); UI source (Panda-derived, §6.3). Resolved in v0.2.1: OMP identity (Oh My Pi, §5); desktop sidecar packaging path (§6.5). Resolved by #9: OMP runtime requirement (Bun script, spawned via `omp --mode=acp` with telemetry opted out — §17 item 1 note). Resolved by #11: minimal GitLab PAT scopes (`read_api`; §7.2).
 
 Remaining, each annotated with what it blocks:
 
@@ -552,7 +552,7 @@ Remaining, each annotated with what it blocks:
 8. How should repo ACLs be synchronized from SCM systems? — Phase 3.
 9. Do we need PR/Issue/ADR context in V1, or only source code? — Phase 3 scoping.
 10. Should architecture graph state be persisted separately from CBM? — Phase 3.
-11. Which GitLab PAT scopes are minimally sufficient (`read_api` ± `read_repository`)? — Phase 0, alongside §17 item 1.
+11. ~~Which GitLab PAT scopes are minimally sufficient (`read_api` ± `read_repository`)?~~ — resolved (#11): `read_api` alone (§7.2).
 
 ## 20. Current Recommended Direction
 

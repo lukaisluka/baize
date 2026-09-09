@@ -32,13 +32,15 @@ The process binds 127.0.0.1 only and runs in the foreground; Ctrl-C stops it.
   GitLab base URL and a PAT (`read_api` scope is enough), then discover a
   group recursively or an explicit repo list. Discovered repos clone as bare
   mirrors under `~/.baize/repos/` and stay current via polling (default 15m)
-  plus a manual **Sync now**; per-repo branch overrides pin the tracked
-  branch. Cloning uses system git with your ambient credentials (SSH agent /
-  credential helper) — the PAT is never embedded in a remote URL. Git
-  authentication failures mark the repo `needs-auth` and back off
-  exponentially; manual sync overrides the backoff. The token is stored in
-  `~/.baize/config.json` (0600), used only for GitLab API calls, never echoed
-  back to any UI or written to logs.
+  plus manual **Sync now** (globally or per repo); per-repo branch overrides
+  pin the tracked branch. Cloning uses system git with your ambient
+  credentials (SSH agent / credential helper) — the PAT is never embedded in
+  a remote URL, and remote URLs returned by discovery are allowlisted to
+  https/ssh/git transports (no `ext::`, no local paths). Git authentication
+  failures mark the repo `needs-auth` and back off exponentially; manual sync
+  overrides the backoff. The token is stored in `~/.baize/config.json`
+  (0600), used only for GitLab API calls, never echoed back to any UI or
+  written to logs.
 - **`/api/*`** — health, repos, GitLab settings/discovery, and mirror-sync
   state/control endpoints.
 

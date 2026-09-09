@@ -162,7 +162,7 @@ const FLEET_HTML = `<!doctype html>
     </div>
     <div id="sync-notice" class="error-text"></div>
     <table id="sync-table" hidden>
-      <thead><tr><th>Repo</th><th>Status</th><th>Branch</th><th>Last sync</th><th>Revision</th></tr></thead>
+      <thead><tr><th>Repo</th><th>Status</th><th>Branch</th><th>Last sync</th><th>Revision</th><th></th></tr></thead>
       <tbody id="sync-rows"></tbody>
     </table>
     <div id="sync-empty" class="muted">No mirrors yet — discover and sync above; discovered repositories clone into ~/.baize/repos/.</div>
@@ -325,7 +325,13 @@ async function refreshSync() {
     const chip = document.createElement('span');
     chip.className = 'status ' + (st.status === 'needs-auth' || st.status === 'error' ? 'error' : st.status === 'idle' ? 'ready' : 'indexing');
     chip.textContent = st.status;
-    if (st.status === 'needs-auth') chip.title = 'git authentication failed — check your SSH agent / credential helper (the GitLab token is not used for cloning)';
+    const statusCell = td(chip);
+    if (st.status === 'needs-auth') {
+      const hint = document.createElement('div');
+      hint.className = 'error-text';
+      hint.textContent = 'git authentication failed — check your SSH agent / credential helper (the GitLab token is not used for cloning)';
+      statusCell.append(hint);
+    }
     const branch = document.createElement('input');
     branch.value = st.branch ?? '';
     branch.placeholder = 'default';
@@ -337,8 +343,20 @@ async function refreshSync() {
         refreshSync();
       } catch (err) { syncNotice.textContent = err.message; }
     });
+    const syncOne = document.createElement('button');
+    syncOne.textContent = 'Sync';
+    syncOne.title = 'sync this repo now';
+    syncOne.addEventListener('click', async () => {
+      syncNotice.textContent = 'Syncing ' + name + '…';
+      try {
+        const r = await api('/api/sync', { body: { name } });
+        syncNotice.textContent = 'Synced ' + name + '.';
+        if (r.reason) syncNotice.textContent = 'Sync skipped: ' + r.reason;
+        refreshSync();
+      } catch (err) { syncNotice.textContent = err.message; }
+    });
     const time = st.lastSyncAt ? new Date(st.lastSyncAt).toLocaleTimeString() : '';
-    tr.append(td(name), td(chip), td(branch), td(time), td((st.lastRevision ?? '').slice(0, 10)));
+    tr.append(td(name), statusCell, td(branch), td(time), td((st.lastRevision ?? '').slice(0, 10)), td(syncOne));
     if (st.error) tr.title = st.error;
     return tr;
   }));

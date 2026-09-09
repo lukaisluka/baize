@@ -30,6 +30,17 @@ const gitlab = {
     return { repos: [{ name: 'grp/a', defaultBranch: 'main', webUrl: 'https://gitlab.test/grp/a', archived: false }] }
   },
 }
+const syncCalls = []
+const sync = {
+  states: () => ({ 'grp/a': { status: 'needs-auth', branch: 'release', error: 'denied' } }),
+  pollIntervalMinutes: () => 15,
+  syncNow: async (name) => (syncCalls.push(['syncNow', name]), { synced: 1 }),
+  syncAll: async () => (syncCalls.push(['syncAll']), { synced: 2 }),
+  setBranch: (name, branch) => {
+    if (name === 'grp/unknown') throw Object.assign(new Error('unknown mirror: grp/unknown (sync first)'), { statusCode: 400 })
+    return { name, branch }
+  },
+}
 
 // Fake SPA dist for static-serving tests.
 const distDir = join(home, 'ui-dist')
@@ -37,8 +48,8 @@ mkdirSync(join(distDir, 'assets'), { recursive: true })
 writeFileSync(join(distDir, 'index.html'), '<!doctype html><title>baize spa</title>')
 writeFileSync(join(distDir, 'assets', 'app.js'), 'console.log("spa")')
 
-const server = createBaizeServer({ logger, registry, gitlab, uiDist: distDir })
-const noDistServer = createBaizeServer({ logger, registry, gitlab, uiDist: join(home, 'no-dist') })
+const server = createBaizeServer({ logger, registry, gitlab, sync, uiDist: distDir })
+const noDistServer = createBaizeServer({ logger, registry, gitlab, sync, uiDist: join(home, 'no-dist') })
 const bound = await listen(server, { port: 0 })
 const noDistBound = await listen(noDistServer, { port: 0 })
 const base = `http://${bound.host}:${bound.port}`
@@ -234,6 +245,70 @@ test('unknown /api paths and non-GET unknown paths get a JSON 404', async () => 
   const post = await fetch(new URL('/nope', base), { method: 'POST' })
   assert.equal(post.status, 404)
   assert.match(post.headers.get('content-type'), /application\/json/)
+})
+
+test('GET /api/sync exposes states and the poll interval', async () => {
+  const res = await fetch(new URL('/api/sync', base))
+  assert.equal(res.status, 200)
+  assert.deepEqual(await res.json(), {
+    states: { 'grp/a': { status: 'needs-auth', branch: 'release', error: 'denied' } },
+    pollIntervalMinutes: 15,
+  })
+})
+
+test('POST /api/sync routes to syncAll or a per-repo syncNow (JSON gate applies)', async () => {
+  const bare = await fetch(new URL('/api/sync', base), { method: 'POST' })
+  assert.equal(bare.status, 415, 'sync requires application/json like the other writes')
+
+  const before = syncCalls.length
+  const all = await fetch(new URL('/api/sync', base), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  })
+  assert.equal(all.status, 200)
+  assert.deepEqual(await all.json(), { synced: 2 })
+
+  const one = await fetch(new URL('/api/sync', base), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'grp/a' }),
+  })
+  assert.equal(one.status, 200)
+  assert.deepEqual(await one.json(), { synced: 1 })
+  assert.deepEqual(syncCalls.slice(before), [['syncAll'], ['syncNow', 'grp/a']])
+})
+
+test('POST /api/sync/branch trims, nulls empty overrides, and rejects unknown repos', async () => {
+  const missing = await fetch(new URL('/api/sync/branch', base), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  })
+  assert.equal(missing.status, 400)
+  assert.match((await missing.json()).error, /name/)
+
+  const set = await fetch(new URL('/api/sync/branch', base), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'grp/a', branch: '  release  ' }),
+  })
+  assert.deepEqual(await set.json(), { name: 'grp/a', branch: 'release' })
+
+  const clear = await fetch(new URL('/api/sync/branch', base), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'grp/a', branch: '   ' }),
+  })
+  assert.deepEqual(await clear.json(), { name: 'grp/a', branch: null })
+
+  const unknown = await fetch(new URL('/api/sync/branch', base), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'grp/unknown', branch: 'main' }),
+  })
+  assert.equal(unknown.status, 400)
+  assert.match((await unknown.json()).error, /unknown mirror/)
 })
 
 test('requests are trace-logged to baize.log', async () => {

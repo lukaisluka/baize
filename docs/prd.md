@@ -138,7 +138,7 @@ baize CLI — single Node.js process (`npx baize`), binds 127.0.0.1 only
 - Full-text / BM25 search (SQLite FTS5); semantic search via **bundled on-device embeddings** (nomic-embed-code, no API key — fits the self-hosted principle)
 - Code graph, callers / callees (`trace_path`), change-impact analysis (`detect_changes`)
 - MCP tool interface (17 tools as of v0.10.8 — README/docs lag the source; always verify against the pinned version)
-- **Cross-repository relationships exist but are immature**: `cross-repo-intelligence` mode writes `CROSS_HTTP_CALLS` / `CROSS_ASYNC_CALLS` / `CROSS_GRPC_CALLS` / etc. edges bidirectionally into both project DBs, with known false positives and missed edges (upstream issues #523, #1459, #953, #706); Kafka-class async-topic matching is partial. §8.2 remains a hypothesis to quantify in Phase 0 (§17).
+- **Cross-repository relationships exist but are immature**: `cross-repo-intelligence` mode writes `CROSS_HTTP_CALLS` / `CROSS_ASYNC_CALLS` / `CROSS_GRPC_CALLS` / etc. edges bidirectionally into both project DBs, with known false positives and missed edges (upstream issues #523, #1459, #953, #706); Kafka-class async-topic matching is partial. Measured in Phase 0 item 3 — per-transport numbers and go/adjust decisions in §8.2.
 - Storage: one SQLite DB (WAL mode) per project under `CBM_CACHE_DIR` (BaiZe points it at `~/.baize/index/`); cross-DB queries are blocked, so cross-repo edges are duplicated into both DBs
 - A per-account background daemon serves multiple MCP clients; its lifecycle should be owned and supervised by the baize CLI (see §18)
 - Distribution: the npm package downloads the static binary from GitHub Releases at postinstall (needs network); for locked-down environments BaiZe pre-bundles or mirrors the binary
@@ -263,7 +263,7 @@ Users can ask natural-language questions about any repository visible to their c
 - service ownership discovery,
 - business-flow investigation.
 
-### 8.2 Cross-Repository Understanding — hypothesis, pending Phase 0 validation
+### 8.2 Cross-Repository Understanding — measured (Phase 0 item 3, CBM 0.10.8)
 
 BaiZe aims to identify relationships that cross repository boundaries, including:
 
@@ -273,7 +273,29 @@ BaiZe aims to identify relationships that cross repository boundaries, including
 - Kafka / message-bus producers and consumers,
 - database access, event flows, service dependencies.
 
-**Status: unproven.** No confirmed mechanism in CBM links e.g. a Kafka producer in repo A to a consumer in repo B (candidate approaches: topic-name string correlation, proto file fingerprinting, client/server URL matching, org conventions encoded in BaiZe Skills). Phase 0 (§17) must measure what CBM actually delivers before this section reads as a product commitment.
+**Status: measured 2026-09-09.** `benchmark/crossrepo/` writes a 5-repo fixture fleet whose cross-repo links and traps are known by construction, runs CBM's `cross-repo-intelligence` mode, and diffs the reported edges against ground truth (re-run on every CBM upgrade, §18). Results — hit rate over expected links, false positives over all reported edges:
+
+| Transport | Edge type | Hit | FP | Verdict |
+|---|---|---|---|---|
+| HTTP route — `fetch` relative path, `axios.post` full URL | `CROSS_HTTP_CALLS` | 2/4 | 0 | **go**, with the constraints below |
+| HTTP route — axios instance + baseURL (`ordersApi.post`) | `CROSS_HTTP_CALLS` | 0/1 | 0 | adjust — extractor never emits calls for instance methods |
+| HTTP route — inline arrow handler (measured) | `CROSS_HTTP_CALLS` | 0/1 | 0 | adjust — no `HANDLES` edge for arrow-function handlers, so the route can never be linked |
+| Kafka topic (kafkajs) | `CROSS_ASYNC_CALLS` | 0/2 | 0 | **adjust** — kafkajs is invisible to the extractor on 0.10.8 (no ASYNC_CALLS at all) |
+| EventEmitter channel (node:events) | `CROSS_CHANNEL` | 1/1 | 0 | go |
+| gRPC (proto + @grpc/grpc-js) | `CROSS_GRPC_CALLS` | 0/1 | 0 | **adjust** — no gRPC matching pass exists upstream |
+| GraphQL (@apollo/client) | `CROSS_GRAPHQL_CALLS` | 0/1 | 0 | **adjust** — no GraphQL matching pass exists upstream |
+
+All three traps held, but only the string-URL trap is discriminating: with
+kafkajs invisible to the extractor (zero async edges in the whole fleet),
+the two Kafka traps are held vacuously — they become discriminating the day
+Kafka extraction exists.
+
+Constraints that define what "HTTP works" means (verified against upstream source, `pass_cross_repo.c` / `extract_calls.c`):
+
+- The server-side handler must be a **named function** (`app.get('/orders', listOrders)`). Matching follows the Route node's `HANDLES` edge, and the extractor emits `HANDLES` only for identifier / member-expression / string handler arguments — inline arrow functions never match (measured: an inline-arrow fixture route misses). Channel listeners (`LISTENS_ON`) have the same requirement. Real code bases using inline handlers will miss more than these fixture numbers show.
+- Client-side extraction is form-sensitive: `fetch` with a relative path and `axios.post` with a full URL are extracted; axios instance methods are not.
+
+**Decision**: cross-repo understanding ships as an engine commitment for **HTTP routes and EventEmitter-style channels only**. Kafka, gRPC, and GraphQL cross-repo discovery are not engine commitments — they are covered by the `cross-repo-investigation` skill family and search-augmented investigation (§9) until upstream closes the gap, and §8.4 inherits the same boundary.
 
 ### 8.3 Evidence and Citations
 
@@ -287,7 +309,7 @@ The UI enforces the converse visibly (issue #10): a settled turn whose answer ci
 
 ### 8.4 Change Impact Analysis
 
-Given a symbol, file, API, schema, topic, or diff: identify direct and transitive dependents, affected repositories, blast-radius classification, and supporting evidence. (Subject to CBM capability validation, §17.)
+Given a symbol, file, API, schema, topic, or diff: identify direct and transitive dependents, affected repositories, blast-radius classification, and supporting evidence. Engine-backed impact analysis is bounded by §8.2's measured coverage (HTTP routes and channels; Kafka/gRPC/GraphQL cross-repo edges do not exist today) — other transports rely on the BaiZe Skills and search-augmented investigation of §9.
 
 ### 8.5 Architecture Exploration
 
@@ -509,6 +531,8 @@ Each item has a pass criterion; failure triggers a documented fallback decision 
 > **MCP wiring — confirmed (issue #10)**: OMP's ACP mode does **not** load project-level `.omp/mcp.json` (verified empirically: zero codebase-memory records in OMP logs; only the user-level `~/.omp/agent/mcp.json` is read, which BaiZe must not touch — it would pollute every OMP session on the host). The working channel is the ACP standard itself: `session/new` / `session/load` / `session/resume` accept an `mcpServers` parameter (per the ACP spec, each element's `env` is an array of `{name, value}` pairs, not an object). BaiZe's bridge injects the CBM server (binary from `node_modules`, `--ui=false`, `CBM_CACHE_DIR` pointed at the index cache) into those requests before forwarding; client-declared servers with the same name win. Verified end-to-end: the model discovers and calls `mcp__codebase-memory__*` tools and answers with file:line citations.
 | 2 | **Multi-repo store**: can one CBM instance hold multiple repositories with repo-scoped queries? | Index 20 repos into one store; run scoped and unscoped queries | Queries correctly scope by repo; no cross-contamination of results |
 | 3 | **Cross-repo relationships**: quantify CBM's `cross-repo-intelligence` mode per relationship type — HTTP routes, gRPC, GraphQL, async topics (**Kafka explicitly; upstream matching is partial**), proto imports | Index 3–5 repos with known cross-repo links; run `index_repository` in `cross-repo-intelligence` mode with `target_projects`; query for each known link | Hit-rate **and false-positive rate** per relationship type recorded (upstream has both failure modes: #523 misses, #1459 false positives); thresholds set at first run — the numbers themselves are the deliverable |
+
+> **Cross-repo relationships — measured (issue #14, 2026-09-09, CBM 0.10.8)**: HTTP 2/4 (misses: axios instance methods; inline-arrow server handler — the named-handler constraint is now measured, not just source-verified), channel 1/1, Kafka/kafkajs 0/2 (extractor emits no ASYNC_CALLS for kafkajs), gRPC 0/1 and GraphQL 0/1 (no matching pass upstream). 0 false positives; string-URL trap held; the two Kafka traps are held vacuously (nothing async to conflate). Full numbers and go/adjust decisions in §8.2. Harness: `benchmark/crossrepo/measure.mjs` — re-run on every CBM upgrade.
 | 4 | **Incremental indexing**: does a push trigger index update without full re-index? | Push a representative commit; measure latency and changed-work scope | Incremental latency in seconds-to-minutes; no full re-index |
 | 5 | **Scale smoke**: size/time/memory for 20 representative repos | Measure during item 2 | Numbers recorded as S1 baseline; no runaway WAL/disk growth |
 | 6 | **Query latency**: P50/P95 on a fixed 20-question probe set | Script the probes against the MCP tools | Latencies recorded; flag anything P95 > 5s for investigation |
@@ -523,7 +547,7 @@ Confirmed spawnable as an MCP stdio static binary (npm postinstall download). OM
 
 ### CBM capability gap
 
-Cross-repo relationship quality is unproven and upstream issues show both misses and false positives (§8.2). _Mitigation_: Phase 0 item 3 quantifies the gap per relationship type; BaiZe Skills and search-augmented investigation compensate where static analysis falls short; worst case re-scopes §8.2/§8.4 commitments.
+Cross-repo relationship quality is now measured (Phase 0 item 3, §8.2): HTTP-route and channel matching work with strict source-form constraints, while Kafka/kafkajs, gRPC, and GraphQL cross-repo edges do not exist on CBM 0.10.8. The numbers move with every CBM upgrade — upstream issues show both misses and false positives (#523, #1459, #953, #706). _Mitigation_: re-run `benchmark/crossrepo/measure.mjs` on every upgrade; BaiZe Skills and search-augmented investigation compensate where static analysis falls short; §8.2/§8.4 commitments already reflect the measured boundary.
 
 ### CBM project maturity (new)
 

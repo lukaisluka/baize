@@ -25,8 +25,15 @@ const BACKOFF_SCHEDULE_MINUTES = [1, 5, 15, 60, 240, 1440]
 const DEFAULT_GIT_TIMEOUT_MS = 10 * 60 * 1000
 
 export function isValidRemoteUrl(url) {
-  if (typeof url !== 'string' || /\s/.test(url) || url.startsWith('-')) return false
-  if (/^(?:https?|ssh|git):\/\/\S+$/i.test(url)) return true
+  if (typeof url !== 'string' || url.startsWith('-')) return false
+  // Printable ASCII only: a NUL or control byte inside a URL makes spawn()
+  // throw synchronously, which must never depend on the caller catching it.
+  if (!/^[\x21-\x7E]+$/.test(url)) return false
+  if (/^(?:https?|ssh|git):\/\/\S+$/i.test(url)) {
+    // git itself refuses dash-leading hostnames (option smuggling); refuse
+    // them here too so the defense does not hinge on the git version.
+    return !url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').startsWith('-')
+  }
   // scp style — what GitLab's ssh_url_to_repo looks like: git@host:group/proj.git
   return /^[A-Za-z0-9][A-Za-z0-9._-]*@\S+:\S+$/.test(url)
 }
@@ -40,8 +47,11 @@ const AUTH_FAILURE_PATTERNS = [
   /[Pp]ermission denied \((?:publickey|password)\)/, // SSH key/password rejected
 ]
 
+// Checked for EVERY failure regardless of exit code: `git clone` reports auth
+// failures as 128, but `git remote update` propagates them as 1 — the exit
+// code is noise, the wording is the signal.
 function isAuthFailure(result) {
-  if (result.code !== 128 && !result.error) return false
+  if (result.ok && !result.error) return false
   return AUTH_FAILURE_PATTERNS.some((re) => re.test(result.stderr || ''))
 }
 
@@ -59,7 +69,7 @@ export function createSyncEngine({
   const mirrors = new Map() // name -> { status, lastSyncAt?, lastRevision?, error?, backoffAttempt, backoffUntil? }
   const inFlight = new Set()
   const children = new Set() // live git processes — killed on stop()
-  let lastDiscovery = null // Set of repo names from the last successful discovery
+  let lastDiscovery = null // Set of repo names from the last successful discovery (two-strikes pruning + setBranch validation)
   let queue = Promise.resolve()
   let timer = null
   let started = false
@@ -82,7 +92,8 @@ export function createSyncEngine({
   // pipes. Killing only the parent leaves the helpers holding the pipes, and
   // the child's 'close' event (which waits for stdio EOF) then never fires.
   // detached: true puts git in its own process group so a kill can take the
-  // whole tree down.
+  // whole tree down. (POSIX only — on Windows the group-kill fallback covers
+  // just the parent, so helpers could linger there.)
   function killTree(child, signal = 'SIGKILL') {
     try {
       process.kill(-child.pid, signal)
@@ -95,7 +106,14 @@ export function createSyncEngine({
 
   function git(args, cwd) {
     return new Promise((resolve) => {
-      const child = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: true })
+      let child
+      try {
+        child = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: true })
+      } catch (err) {
+        // spawn() throws synchronously for hostile argv (e.g. NUL bytes) —
+        // resolve as a git failure instead of rejecting past the caller.
+        return resolve({ ok: false, error: `failed to start git: ${err.message}` })
+      }
       children.add(child)
       let out = ''
       let err = ''
@@ -147,10 +165,10 @@ export function createSyncEngine({
     return remote.ok && remote.stdout.trim().length > 0
   }
 
-  // Returns true when a sync was actually attempted (for the cycle's count);
-  // false when an in-flight sync for the same repo already covers this call.
+  // Outcomes feed the cycle count: 'ok' synced, 'fail' attempted and failed
+  // (including refused URLs), 'skip' collapsed into an in-flight sync.
   async function syncMirror(name, url) {
-    if (inFlight.has(name)) return false
+    if (inFlight.has(name)) return 'skip'
     inFlight.add(name)
     try {
       if (!validateUrl(url)) {
@@ -159,7 +177,7 @@ export function createSyncEngine({
           error: `rejected remote URL (only https/ssh/git URLs are allowed): ${url}`,
         })
         logger?.warn(`sync: ${name} rejected remote URL from discovery`)
-        return true
+        return 'fail'
       }
 
       const path = mirrorPath(name)
@@ -197,7 +215,7 @@ export function createSyncEngine({
           backoffUntil: null,
         })
         logger?.info(`sync: ${name} ${exists ? 'fetched' : 'cloned'} @ ${revision ?? 'unknown'}`)
-        return true
+        return 'ok'
       }
 
       const auth = isAuthFailure(result)
@@ -212,7 +230,7 @@ export function createSyncEngine({
         backoffUntil: now() + backoffMs(attempt),
       })
       logger?.warn(`sync: ${name} failed (${auth ? 'auth' : 'error'}), backing off ${backoffMs(attempt) / 60000}m`)
-      return true
+      return 'fail'
     } finally {
       inFlight.delete(name)
     }
@@ -236,7 +254,7 @@ export function createSyncEngine({
   // queue: one git at a time keeps localhost and any upstream calm, and the
   // HTTP handlers / poll timer / stop() all see the same ordering.
   async function runCycle({ manual = false, only } = {}) {
-    if (!config.gitlab?.selection) return { synced: 0, reason: 'no selection' }
+    if (!config.gitlab?.selection) return { synced: 0, failed: 0, reason: 'no selection' }
     let repos = []
     try {
       const result = config.gitlab.selection.type === 'group'
@@ -246,57 +264,78 @@ export function createSyncEngine({
     } catch (err) {
       logger?.warn(`sync: discovery failed: ${err.message}`)
       if (manual) throw err
-      return { synced: 0, reason: err.code ?? 'discovery failed' }
+      return { synced: 0, failed: 0, reason: err.code ?? 'discovery failed' }
     }
 
     pruneStale(repos)
 
     let synced = 0
+    let failed = 0
     for (const repo of repos) {
       if (only && repo.name !== only) continue
       // Manual sync (button / branch change) overrides backoff — the user
       // asked for it now; only the poll timer respects the backoff window.
       if (!manual && !dueForSync(repo.name)) continue
-      if (await syncMirror(repo.name, repo.url)) synced += 1
+      // One hostile repo (bad URL, crashed git) must not take the whole
+      // cycle down with it — the rest of the fleet still gets its turn.
+      let outcome
+      try {
+        outcome = await syncMirror(repo.name, repo.url)
+      } catch (err) {
+        setState(repo.name, { status: 'error', error: String(err?.message ?? err).slice(0, 500) })
+        logger?.error(`sync: ${repo.name} crashed its sync attempt: ${err?.message ?? err}`)
+        outcome = 'fail'
+      }
+      if (outcome === 'ok') synced += 1
+      else if (outcome === 'fail') failed += 1
     }
-    return { synced }
+    return { synced, failed }
   }
 
   // Repos that left the selection (moved, renamed, deselected) must not keep
-  // branch overrides or states forever. Disk mirrors are left in place —
-  // deleting user data on a transient discovery quirk is worse than the leak.
+  // branch overrides or states forever. Two-strikes: pruned only when BOTH
+  // the current and the previous discovery omit the repo, so one short or
+  // flaky listing cannot wipe live overrides. Disk mirrors are left in
+  // place — deleting user data on a transient discovery quirk is worse than
+  // the leak.
   function pruneStale(repos) {
-    lastDiscovery = new Set(repos.map((r) => r.name))
-    let pruned = []
-    for (const name of [...mirrors.keys()]) {
-      if (!lastDiscovery.has(name)) {
-        mirrors.delete(name)
-        pruned.push(name)
+    const current = new Set(repos.map((r) => r.name))
+    if (lastDiscovery) {
+      const gone = (name) => !current.has(name) && !lastDiscovery.has(name)
+      const pruned = []
+      for (const name of [...mirrors.keys()]) {
+        if (gone(name)) {
+          mirrors.delete(name)
+          pruned.push(name)
+        }
+      }
+      for (const name of Object.keys(config.mirrors ?? {})) {
+        if (gone(name)) {
+          delete config.mirrors[name]
+          pruned.push(name)
+        }
+      }
+      if (pruned.length > 0) {
+        save()
+        logger?.info(`sync: pruned deselected repos: ${pruned.join(', ')}`)
       }
     }
-    for (const name of Object.keys(config.mirrors ?? {})) {
-      if (!lastDiscovery.has(name)) {
-        delete config.mirrors[name]
-        pruned.push(name)
-      }
-    }
-    if (pruned.length > 0) {
-      save()
-      logger?.info(`sync: pruned deselected repos: ${pruned.join(', ')}`)
-    }
+    lastDiscovery = current
   }
 
   function enqueue(work) {
     const run = queue.then(work)
-    // Failures must not poison the chain for the next cycle.
-    queue = run.catch(() => {})
+    // Failures must not poison the chain for the next cycle — but they are
+    // logged, never swallowed silently (the poll path has no HTTP caller).
+    queue = run.catch((err) => {
+      logger?.warn(`sync: cycle failed: ${err?.message ?? err}`)
+    })
     return run
   }
 
   const pollIntervalMinutes = () => Math.max(1, Math.round(Number(config.pollIntervalMinutes) || 15))
 
   return {
-    stateOf,
     states() {
       const out = {}
       for (const [name, state] of mirrors) {

@@ -303,7 +303,8 @@ document.getElementById('sync-all').addEventListener('click', async () => {
   syncNotice.textContent = 'Syncing…';
   try {
     const r = await api('/api/sync', { body: {} });
-    syncNotice.textContent = r.reason ? 'Sync skipped: ' + r.reason : 'Synced ' + r.synced + ' repo(s).';
+    if (r.reason) syncNotice.textContent = 'Sync skipped: ' + r.reason;
+    else syncNotice.textContent = 'Synced ' + r.synced + ' repo(s)' + (r.failed ? ', ' + r.failed + ' failed (see table)' : '') + '.';
     refreshSync();
   } catch (err) {
     syncNotice.textContent = err.code === 'GITLAB_UNAUTHORIZED'
@@ -350,8 +351,9 @@ async function refreshSync() {
       syncNotice.textContent = 'Syncing ' + name + '…';
       try {
         const r = await api('/api/sync', { body: { name } });
-        syncNotice.textContent = 'Synced ' + name + '.';
-        if (r.reason) syncNotice.textContent = 'Sync skipped: ' + r.reason;
+        syncNotice.textContent = r.reason
+          ? 'Sync skipped: ' + r.reason
+          : r.synced ? 'Synced ' + name + '.' : 'Sync failed for ' + name + ' (see status).';
         refreshSync();
       } catch (err) { syncNotice.textContent = err.message; }
     });

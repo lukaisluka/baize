@@ -84,6 +84,16 @@ describe('remote URL allowlist', () => {
     }
   })
 
+  test('rejects control characters and dash-leading hostnames', () => {
+    // A NUL byte makes spawn() throw synchronously — it must die at the door,
+    // not depend on every caller catching the throw.
+    assert.equal(isValidRemoteUrl('ssh://git@host/repo\0evil'), false)
+    assert.equal(isValidRemoteUrl('https://host/\x01x'), false)
+    // git blocks dash-leading hostnames itself; refuse them independently of
+    // the installed git version.
+    assert.equal(isValidRemoteUrl('ssh://-oProxyCommand=evil/x'), false)
+  })
+
   test('engine refuses to clone rejected URLs and leaves no repos dir', { timeout: 60000 }, async () => {
     const home = tempHome()
     const config = { gitlab: { selection: { type: 'repos', repos: ['grp/evil', 'grp/flag', 'grp/plain'] } }, mirrors: {} }
@@ -99,7 +109,8 @@ describe('remote URL allowlist', () => {
     const engine = createSyncEngine({ home, config, save: () => {}, gitlab, logger: quietLogger })
     try {
       const result = await engine.syncAll()
-      assert.equal(result.synced, 3, 'each repo was attempted (and refused)')
+      assert.equal(result.synced, 0, 'nothing synced')
+      assert.equal(result.failed, 3, 'each rejection counted as a failure')
       const states = engine.states()
       for (const name of ['grp/evil', 'grp/flag', 'grp/plain']) {
         assert.equal(states[name].status, 'error', name)
@@ -108,6 +119,37 @@ describe('remote URL allowlist', () => {
       assert.ok(!existsSync(join(home, 'repos')), 'no clone was ever started')
     } finally {
       await engine.stop()
+      cleanupHome(home)
+    }
+  })
+
+  test('one repo with a spawn-breaking URL cannot stall the rest of the cycle', { timeout: 60000 }, async () => {
+    const work = mkdtempSync(join(tmpdir(), 'baize-sync-hostile-'))
+    const home = tempHome()
+    const source = makeSourceRepo(work)
+    const config = { gitlab: { selection: { type: 'repos', repos: ['g/bad', 'g/good'] } }, mirrors: {} }
+    const gitlab = {
+      discover: async () => ({
+        repos: [
+          // Deliberately permissive validator below: the allowlist normally
+          // stops NUL bytes at the door (unit tests above) — this proves the
+          // engine still survives one that slips through to spawn().
+          { name: 'g/bad', sshUrl: 'ssh://git@host/repo\0evil', httpUrl: '', defaultBranch: 'main', webUrl: 'x' },
+          { name: 'g/good', sshUrl: source, httpUrl: source, defaultBranch: 'main', webUrl: 'x' },
+        ],
+      }),
+    }
+    const engine = createSyncEngine({ home, config, save: () => {}, gitlab, logger: quietLogger, validateUrl: () => true })
+    try {
+      const result = await engine.syncAll()
+      assert.equal(result.synced, 1, 'the good repo still synced')
+      assert.equal(result.failed, 1)
+      assert.equal(engine.states()['g/bad'].status, 'error')
+      assert.match(engine.states()['g/bad'].error, /failed to start git/)
+      assert.equal(engine.states()['g/good'].status, 'idle')
+    } finally {
+      await engine.stop()
+      rmSync(work, { recursive: true, force: true })
       cleanupHome(home)
     }
   })
@@ -182,11 +224,10 @@ describe('mirror healing and config hygiene', () => {
   const home = tempHome()
   const source = makeSourceRepo(work)
   const allowLocal = (url) => String(url).startsWith('/') || isValidRemoteUrl(url)
-  const config = { gitlab: { selection: { type: 'repos', repos: ['grp/alpha'] } }, mirrors: { 'grp/gone': { branch: 'main' } } }
+  const config = { gitlab: { selection: { type: 'repos', repos: ['grp/alpha', 'grp/gone'] } }, mirrors: { 'grp/gone': { branch: 'main' } } }
   const saved = []
-  const gitlab = {
-    discover: async () => ({ repos: [{ name: 'grp/alpha', sshUrl: source, httpUrl: source, defaultBranch: 'main', webUrl: 'x' }] }),
-  }
+  const reposList = [{ name: 'grp/alpha', sshUrl: source, httpUrl: source, defaultBranch: 'main', webUrl: 'x' }]
+  const gitlab = { discover: async () => ({ repos: reposList.slice() }) }
   let engine
 
   before(() => {
@@ -217,7 +258,8 @@ describe('mirror healing and config hygiene', () => {
     }
     const engineMissing = createSyncEngine({ home, config, save: () => {}, gitlab: gitlabMissing, logger: quietLogger, validateUrl: allowLocal })
     try {
-      await engineMissing.syncAll()
+      const result = await engineMissing.syncAll()
+      assert.equal(result.failed, 1)
       const state = engineMissing.states()['grp/alpha']
       assert.equal(state.status, 'error', 'a missing repo is an error, not an auth failure')
       assert.doesNotMatch(state.error, /needs/)
@@ -227,11 +269,24 @@ describe('mirror healing and config hygiene', () => {
     }
   })
 
-  test('repos that left the selection lose their override and state', { timeout: 60000 }, async () => {
+  test('deselected repos are pruned only after two consecutive omissions', { timeout: 60000 }, async () => {
+    // grp/gone was deselected before this engine started and carries a stale
+    // override in config.mirrors. The recreate test's cycle already omitted
+    // it once, so this cycle is the second strike.
     await engine.syncAll()
-    assert.equal(config.mirrors['grp/gone'], undefined, 'override pruned')
+    assert.equal(config.mirrors['grp/gone'], undefined, 'stale override pruned')
     assert.ok(saved.some((c) => c.mirrors && !('grp/gone' in c.mirrors)), 'prune persisted via save()')
-    assert.equal(engine.states()['grp/gone'], undefined, 'state pruned')
+
+    // A repo that was synced and then deselected keeps its state for one
+    // grace cycle before being pruned.
+    reposList.push({ name: 'grp/beta', sshUrl: source, httpUrl: source, defaultBranch: 'main', webUrl: 'x' })
+    await engine.syncAll()
+    assert.equal(engine.states()['grp/beta'].status, 'idle')
+    reposList.pop()
+    await engine.syncAll() // first omission — previous discovery still knows beta
+    assert.notEqual(engine.states()['grp/beta'], undefined, 'grace cycle keeps the state')
+    await engine.syncAll() // second omission — both latest discoveries agree
+    assert.equal(engine.states()['grp/beta'], undefined, 'state pruned after two omissions')
   })
 
   test('setBranch rejects names the engine has never seen', () => {
@@ -283,7 +338,8 @@ describe('auth failure handling', () => {
 
   test('401 and 403 clones mark the repo needs-auth with an error trail', { timeout: 60000 }, async () => {
     const result = await engine.syncAll()
-    assert.equal(result.synced, 2)
+    assert.equal(result.synced, 0)
+    assert.equal(result.failed, 2)
     for (const name of ['grp/locked', 'grp/forbidden']) {
       const state = engine.states()[name]
       assert.equal(state.status, 'needs-auth', name)
@@ -298,11 +354,37 @@ describe('auth failure handling', () => {
     // A manual "Sync now" is explicit user intent — it must not be swallowed
     // by the backoff window.
     const manual = await engine.syncAll()
-    assert.equal(manual.synced, 2, 'manual sync overrides backoff')
+    assert.equal(manual.failed, 2, 'manual sync overrides backoff')
     clock += 61 * 60 * 1000 // past the 60m schedule ceiling
     const again = await engine.pollCycle()
-    assert.equal(again.synced, 2, 'retry fires once the backoff window passes')
+    assert.equal(again.failed, 2, 'retry fires once the backoff window passes')
     assert.equal(engine.states()['grp/locked'].status, 'needs-auth')
+  })
+
+  test('auth failure on the FETCH path still classifies needs-auth (regression)', { timeout: 60000 }, async () => {
+    // Clone succeeds with valid credentials; the credential then breaks
+    // upstream (rotated PAT, removed ssh key) — `git remote update` reports
+    // exit 1 (not clone's 128), which is the case §7.3 exists for.
+    const work = mkdtempSync(join(tmpdir(), 'baize-sync-fetchauth-'))
+    const home2 = tempHome()
+    const source = makeSourceRepo(work)
+    const config2 = { gitlab: { selection: { type: 'repos', repos: ['grp/cred'] } }, mirrors: {} }
+    const gitlab2 = {
+      discover: async () => ({ repos: [{ name: 'grp/cred', sshUrl: source, httpUrl: source, defaultBranch: 'main', webUrl: 'x' }] }),
+    }
+    const engine2 = createSyncEngine({ home: home2, config: config2, save: () => {}, gitlab: gitlab2, logger, validateUrl: allowLocal })
+    try {
+      const first = await engine2.syncAll()
+      assert.equal(first.synced, 1)
+      execFileSync('git', ['-C', engine2.mirrorPathOf('grp/cred'), 'remote', 'set-url', 'origin', `http://127.0.0.1:${port}/rotated.git`], { encoding: 'utf8' })
+      const second = await engine2.syncAll()
+      assert.equal(second.failed, 1)
+      assert.equal(engine2.states()['grp/cred'].status, 'needs-auth', 'fetch-path auth failure (exit code 1)')
+    } finally {
+      await engine2.stop()
+      rmSync(work, { recursive: true, force: true })
+      cleanupHome(home2)
+    }
   })
 })
 
@@ -339,7 +421,7 @@ describe('git child lifecycle', () => {
       assert.match(state.error, /timed out/)
       // The queue must be free again: the next cycle returns promptly.
       const again = await engine.syncAll()
-      assert.equal(again.synced, 1)
+      assert.equal(again.failed, 1)
     } finally {
       await engine.stop()
     }

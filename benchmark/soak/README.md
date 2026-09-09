@@ -65,7 +65,12 @@ Close to how baize actually drives CBM:
   child is OUR direct child (ppid == the soak process) running `--ui=false`;
   the daemon is the child's direct child with `--cbm-daemon-internal`;
   index workers carry `--response-out` pointing into this run's cache dir.
-  Anything else is counted as unattributed and never adopted. Sampling
+  Anything else is counted as unattributed and never adopted — the report
+  surfaces `unattributed.maxCount`; a healthy run reads 0. Caveat: worker
+  attribution matches the cache-dir string as written, so passing an
+  `--out` whose *realpath* differs from its written path (a custom symlinked
+  parent) can mis-attribute this run's workers as unattributed — the
+  default `tmpdir()` and plain `/tmp` paths are verified safe. Sampling
   limits to know: a daemon spawned by an earlier (since-restarted) child
   drops out of the ppid chain and reads as unattributed, and two restarts
   between samples collapse into one PID change. Restart detection is

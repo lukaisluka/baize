@@ -179,18 +179,18 @@ function snapshotProcs(binaryPath, cacheDir) {
     unattributedCbm: 0,
   }
   const child = rows.find((r) => r.ppid === process.pid && r.args.includes(binaryPath) && r.args.includes('--ui=false'))
+  const daemon = child ? rows.find((r) => r.ppid === child.pid && r.args.includes('--cbm-daemon-internal')) : undefined
   if (child) {
     out.childPid = child.pid
     out.childRssKb = child.rssKb
-    const daemon = rows.find((r) => r.ppid === child.pid && r.args.includes('--cbm-daemon-internal'))
-    if (daemon) {
-      out.daemonPid = daemon.pid
-      out.daemonRssKb = daemon.rssKb
-    }
+  }
+  if (daemon) {
+    out.daemonPid = daemon.pid
+    out.daemonRssKb = daemon.rssKb
   }
   for (const r of rows) {
     if (!r.args.includes(binaryPath)) continue
-    if (r === child) continue
+    if (r === child || r === daemon) continue
     if (r.args.includes('--response-out') && r.args.includes(cacheDir)) {
       out.indexWorkers += 1
       out.indexWorkersRssKb += r.rssKb
@@ -216,13 +216,30 @@ function snapshotCache(cacheDir) {
   }
   if (!existsSync(cacheDir)) return out
   const walk = (dirIn) => {
-    for (const entry of readdirSync(dirIn, { withFileTypes: true })) {
+    let entries
+    try {
+      entries = readdirSync(dirIn, { withFileTypes: true })
+    } catch (err) {
+      if (err.code === 'ENOENT') return // dir vanished mid-walk (stage rename)
+      throw err
+    }
+    for (const entry of entries) {
       const p = join(dirIn, entry.name)
       if (entry.isDirectory()) {
         walk(p)
         continue
       }
-      const size = statSync(p).size
+      // Stage files are renamed into place and worker-response files are
+      // created-and-deleted per call — a file that vanishes between readdir
+      // and stat did not exist at sample time; skip it rather than abort a
+      // multi-hour run on a benign race.
+      let size
+      try {
+        size = statSync(p).size
+      } catch (err) {
+        if (err.code === 'ENOENT') continue
+        throw err
+      }
       out.cacheBytes += size
       if (p.endsWith('.db')) out.dbBytes += size
       else if (p.endsWith('-wal')) {
@@ -366,9 +383,12 @@ async function main() {
           }
         }),
       )
-      // A whole round with zero successes is systemic (daemon cache-dir
+      // A cold start with zero successes is systemic (daemon cache-dir
       // conflict, broken binary), not soak signal — burning the remaining
-      // duration on it would produce a 24 h all-error report.
+      // duration on it would produce a 24 h all-error report. This is
+      // cumulative (indexOk across all rounds), so a later wedge does NOT
+      // stop the run: a daemon wedge mid-run is exactly the soak signal we
+      // are hunting, and the counters carry it.
       if (ctx.m.indexOk === 0) {
         log(`FATAL: round ${round} completed with zero successful indexes (${ctx.m.indexErr} failed) — see cbm: lines above for the root cause`)
         stop('all-indexes-failed')
@@ -440,7 +460,7 @@ async function main() {
       `sample: db=${(cache.dbBytes / 1e6).toFixed(1)}MB stage=${(cache.stageBytes / 1e6).toFixed(1)}MB(max ${(cache.stageMaxBytes / 1e6).toFixed(1)}) ` +
         `wal=${(cache.walBytes / 1e6).toFixed(1)}MB cache=${(cache.cacheBytes / 1e6).toFixed(1)}MB ` +
         `daemon=${procs.daemonPid ?? 'UNATTRIBUTED'}@${procs.daemonRssKb ?? '?'}KB workers=${procs.indexWorkers}@${(procs.indexWorkersRssKb / 1024).toFixed(0)}MB ` +
-        `idx=${ctx.m.indexOk}/${ctx.m.indexErr} q=${ctx.m.queryOk}/${ctx.m.queryErr}`,
+        `unattr=${procs.unattributedCbm} idx=${ctx.m.indexOk}/${ctx.m.indexErr} q=${ctx.m.queryOk}/${ctx.m.queryErr}`,
     )
   }
 
@@ -478,7 +498,9 @@ async function main() {
     if (!ctx.stopped) stop('deadline')
     try {
       sampleOnce() // final sample
-    } catch { /* already logged its own failure */ }
+    } catch (err) {
+      log(`final sample failed: ${err.message}`)
+    }
     try {
       await cbm.stop()
     } catch (err) {
@@ -491,7 +513,7 @@ async function main() {
       `summary: indexOk=${report.index.ok} indexErr=${report.index.err} queryOk=${report.query.ok} queryErr=${report.query.err} ` +
         `maxStageMB=${(report.stage.maxTotalBytes / 1e6).toFixed(1)} maxWalMB=${(report.wal.maxTotalBytes / 1e6).toFixed(1)} ` +
         `dbMB=${(report.db.finalBytes / 1e6).toFixed(1)} daemonRestarts=${report.daemon.restarts} childRestarts=${report.daemon.childRestarts} ` +
-        `maxIndexWorkers=${report.indexWorkers.maxConcurrent}`,
+        `maxIndexWorkers=${report.indexWorkers.maxConcurrent} unattributedCbmMax=${report.unattributed.maxCount}`,
     )
     // The unindexed tail is a loud failure, not a footnote: a repo that never
     // completed a single index round makes every other number meaningless.
@@ -564,6 +586,13 @@ function buildReport(cfg, ctx, fleet) {
     indexWorkers: {
       maxConcurrent: maxOf('indexWorkers'),
       maxRssKb: maxOf('indexWorkersRssKb'),
+    },
+    // CBM processes the tree walk could NOT attribute to this run. A healthy
+    // run reads 0; anything above means foreign CBM activity on the host or an
+    // attribution hole — either way it invalidates cross-run comparisons.
+    unattributed: {
+      maxCount: maxOf('unattributedCbm'),
+      lastCount: samples.at(-1)?.unattributedCbm ?? 0,
     },
     index: {
       ok: ctx.m.indexOk,

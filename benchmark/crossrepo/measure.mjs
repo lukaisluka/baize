@@ -88,8 +88,10 @@ async function main() {
   const report = { startedAt: new Date().toISOString(), repos: [], edges: [], typeSummary: {} }
   // Guard rails against silently degenerate reports (the worst failure mode
   // of this harness — confident wrong numbers): every row must be
-  // attributable, the collected rows must cover what the cross-repo runs
-  // declared, and nothing may hide behind the query LIMIT.
+  // attributable, and the collected rows must cover what the cross-repo
+  // runs declared — that check also catches query truncation (NB: with
+  // format:json, query_graph's `total` is the returned row count, not the
+  // match count, so it cannot detect truncation itself).
   let rawRows = 0
   let declaredEdges = 0
   let unattributedRows = 0
@@ -123,9 +125,6 @@ async function main() {
       })
       if (!Array.isArray(q.rows)) {
         throw new Error(`query_graph on ${project} returned no rows array (got ${typeof q.rows}) — response shape changed?`)
-      }
-      if (typeof q.total === 'number' && q.total > q.rows.length) {
-        throw new Error(`query_graph on ${project} truncated: ${q.total} matches, ${q.rows.length} returned (LIMIT 500)`)
       }
       for (const [rel, fromName, toName, propsRaw] of q.rows) {
         rawRows += 1

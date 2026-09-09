@@ -1,0 +1,552 @@
+# BaiZe PRD
+
+> Status: Draft
+> Product: BaiZe
+> Version: 0.2
+>
+> Changelog v0.2:
+> - Positioning split into **Personal form** (single-user local web tool, `npx baize`) and **Enterprise form** (later; 800+ repos, gateway/ACL/audit). Sections marked **[Enterprise]** are out of MVP scope.
+> - MVP architecture fixed: single Node.js orchestrator process; web UI derived from Panda's web code; ACP-over-WebSocket for chat plus a BaiZe management API.
+> - Fleet pulled into MVP, scoped to GitLab only: PAT for API discovery, system git for clone/fetch, polling + manual sync, bare mirrors, per-repo `needs-auth` handling.
+> - ACL in Personal form delegated to the user's own Git credentials.
+> - Optional Tauri desktop shell derived from Panda's `src-tauri` (Node SEA sidecar, to be validated).
+> - New: Terminology; Phase 0 CBM technical-validation checklist with pass criteria.
+> - Success metrics now carry measurement methods; Phase numbering deduplicated (development phases vs scale milestones).
+> - Open questions pruned; each remaining one annotated with what it blocks.
+
+## 1. Background
+
+Large engineering organizations typically spread business logic across hundreds of repositories, services, shared libraries, infrastructure repositories, schemas, event definitions, and historical implementations.
+
+Existing coding agents are strong at reasoning over the current workspace, but they lack a reliable organization-wide view of:
+
+- where relevant code exists,
+- how code in different repositories is connected,
+- which services call or depend on each other,
+- what a change may impact,
+- how to trace a business flow across repositories,
+- how to answer questions using evidence from the actual source code.
+
+BaiZe aims to provide a code understanding layer for AI agents without rebuilding code parsing, graph construction, or model reasoning from scratch.
+
+## 2. Product Vision
+
+**BaiZe enables engineers to ask any question about the codebase as if all repositories formed one coherent software system.**
+
+Example questions:
+
+- Where is funding rate calculated?
+- What happens after an order enters the API gateway?
+- Which repositories publish or consume Kafka topic `trade.executed`?
+- Which services modify user balances after a trade?
+- Who calls `RiskService.CheckOrder`?
+- What would be impacted if this protobuf field changes?
+- Why does this flow exist in this form?
+- Which repositories still depend on a deprecated API?
+- Trace the full flow from order placement to settlement.
+
+## 3. Product Forms and Positioning
+
+BaiZe evolves through two deployment forms. This split is explicit so that MVP scope is not judged against enterprise requirements.
+
+### 3.1 Personal form (V0.x — the focus of this PRD)
+
+- **Single user, runs on the engineer's own machine**, presented as a **web UI** served locally.
+- Started with one command: `npx baize`.
+- **Authorization is delegated to the user's own Git credentials** (GitLab PAT for discovery + the user's local git credentials for clone/fetch): BaiZe can see exactly what the user can already see — nothing more, and no separate ACL system is required at this stage.
+- Target scale: the repositories a single engineer works across — tens to a few hundred. Scale milestones S1–S2 (see §12).
+
+### 3.2 Enterprise form (later)
+
+Shared, centrally deployed control plane around the same engines: gateway, query routing, ACL beyond SCM-token delegation, audit, multi-user, webhook-driven sync, 800+ repositories (scale milestones S3–S5). Only gaps proven by the Personal form and its scale validation get built.
+
+## 4. Design Principles
+
+1. **Local-first / self-hosted**
+   - Source code, indexes, graph data, agent context, logs, and audit records stay on the user's machine (Personal) or inside enterprise infrastructure (Enterprise).
+
+2. **Do not rebuild existing code-intelligence engines**
+   - Reuse `codebase-memory-mcp` (CBM) for code parsing, symbol analysis, graph construction, semantic search, call graph, and impact analysis — subject to the Phase 0 validation in §17.
+
+3. **Agent and intelligence engine are separate**
+   - OMP/pi is responsible for reasoning and research loops.
+   - BaiZe provides organization-wide code context, and (later) routing, security, and orchestration.
+
+4. **Treat all repositories as one software system**
+   - Repository boundaries must not prevent cross-service or cross-domain analysis.
+
+5. **Evidence-first answers**
+   - AI answers should be grounded in source files, symbols, commits, and graph relationships.
+
+6. **Scale incrementally**
+   - Personal form first; enterprise capabilities only where real scale requires them.
+
+## 5. Terminology
+
+| Term | Definition |
+| ---- | ---------- |
+| **ACP** | Agent Client Protocol — JSON-RPC protocol between client UIs and agents (sessions, prompts, tool calls, permissions). Originated at Zed; TS SDK `@agentclientprotocol/sdk`. |
+| **MCP** | Model Context Protocol — tool interface between an agent and tool servers (here: between OMP and CBM). |
+| **OMP / pi** | The reasoning agent runtime BaiZe embeds: agent loop, tool selection, query decomposition, multi-step investigation, evidence aggregation, answer generation. _TBC: the two names are used interchangeably in early drafts; confirm the canonical name and whether it is a public project or an internal runtime._ |
+| **CBM** | `codebase-memory-mcp` — the open-source code-intelligence engine BaiZe reuses for indexing, parsing, search, graph, and the MCP tool surface. Capabilities to be confirmed per §17. |
+| **Zoekt** | Trigram-based code-search engine; optional global recall layer in the Enterprise form only. |
+| **Fleet** | BaiZe's repository management: discovery, synchronization, and indexing orchestration. |
+| **BaiZe Skills** | Static Agent Skill documents loaded by the agent that encode investigation strategies. They are prompt/configuration assets, **not a runtime call-chain hop**. |
+
+## 6. MVP Architecture (Personal Form)
+
+```text
+Browser — BaiZe UI (SPA derived from Panda's web code)
+   |  HTTP + WebSocket
+   |    - ACP over WebSocket: chat / agent sessions
+   |    - BaiZe management API (REST/WS): fleet, config, indexing status
+   v
+baize CLI — single Node.js process (`npx baize`), binds 127.0.0.1 only
+   |-- serves the UI static build
+   |-- ACP bridge (WebSocket <-> stdio)
+   |-- spawns OMP (ACP over stdio)
+   |       `-- MCP (stdio) --> CBM child process
+   `-- fleet worker: scheduled poll + manual sync via system git
+           `-- ~/.baize/repos/ (bare mirrors) --> CBM index (~/.baize/index/)
+```
+
+### 6.1 Component responsibilities
+
+**BaiZe UI** (derived from Panda's web code, see §6.3)
+
+- Chat interface with source-code citations
+- Conversation management
+- Repository/file/symbol navigation
+- Fleet management pages: repo list, sync status, `needs-auth` state, last indexed commit
+- Settings: GitLab URL + PAT, poll interval, per-repo branch overrides
+- Indexing progress and error/status reporting
+- _Eventual_: architecture/dependency graph visualization, research-progress visualization (not MVP)
+
+**OMP / pi**
+
+- Agent loop, tool selection, query decomposition
+- Multi-step investigation and evidence aggregation
+- Final answer generation; optional sub-agents
+
+**CBM (`codebase-memory-mcp`)**
+
+- Repository indexing, tree-sitter parsing, LSP-assisted symbol resolution where available
+- Full-text / BM25 search, semantic search
+- Code graph, callers / callees, change-impact analysis
+- MCP tool interface
+- Cross-repository relationships and architecture queries are a **hypothesis to validate** (§17), not a confirmed capability
+
+**baize CLI (orchestrator)**
+
+- Serves the UI; bridges ACP (WebSocket ↔ stdio)
+- Spawns and supervises OMP; wires OMP's MCP configuration to CBM
+- Runs the fleet worker (§7)
+- Exposes the management API to the UI
+
+### 6.2 Distribution and runtime contract
+
+- **npm package**, run via `npx baize` (or global install). Only prerequisites: Node.js and system `git` with working credentials (checked lazily — see §7).
+- Binds **127.0.0.1 only**; random or configured local port.
+- All state under `~/.baize/`:
+
+```text
+~/.baize/
+├── config.json      # GitLab URL, PAT (chmod 600), poll interval, branch overrides
+├── repos/           # bare mirror clones
+├── index/           # CBM data
+└── logs/
+```
+
+- First-run **setup wizard** in the web UI (no hand-editing config): GitLab URL + PAT → pick group/repos → repo count + disk estimate → start sync with live indexing progress.
+- Foreground process with Ctrl-C to stop (dev-tool style); daemonization is out of scope for V0.1.
+
+### 6.3 UI provenance: derived from Panda
+
+- The UI is **vendored from Panda's web code into the baize repo** — not consumed as an npm dependency. Panda evolves independently; porting upstream fixes is manual until a shared package is justified.
+- Reused as-is where possible: Vite SPA skeleton, ACP client layer, chat UI, citation rendering.
+- New in BaiZe: all management surfaces (fleet, settings, indexing progress) — Panda has no equivalents.
+- Two channels between UI and server: **ACP over WebSocket** (chat/agent sessions, reusing Panda's stdio↔WebSocket bridge pattern) and the **BaiZe management API** (everything else; out of ACP's scope).
+
+### 6.4 Repository layout
+
+Single npm package (no workspace split until a second publishable unit exists):
+
+```text
+baize/
+├── package.json        # bin: baize
+├── src/                # server, orchestrator, fleet worker
+├── ui/                 # Panda-derived SPA (vite build -> dist/ui)
+└── dist/               # published artifact; npx runs from here
+```
+
+### 6.5 Optional desktop shell (Phase 1+, not MVP-critical)
+
+- **Tauri** shell derived from Panda's `desktop/src-tauri`.
+- Shell responsibilities only: spawn the baize CLI as a **sidecar** (packaged via Node SEA — feasibility to be validated in Phase 0) and load the local UI in the system webview.
+- Shares 100% of UI and server code with the `npx` form; adds packaging/signing/notarization pipeline cost, so it ships after the `npx` form is proven.
+
+## 7. Repository Management (Fleet — MVP scope)
+
+Fleet is part of the MVP, scoped down to a single-user GitLab deployment. The enterprise fleet surface is in §13.
+
+### 7.1 Configuration surface
+
+- **SCM**: GitLab only — self-hosted instances and gitlab.com. GitHub/Bitbucket/Azure DevOps: [Enterprise].
+- **User input**: GitLab base URL, PAT, and a selection: a **group** (traversed recursively) or an explicit repo list.
+- **Branch policy**: per-repo branch override; default is the repo's default branch. (Resolves former open question 5.)
+
+### 7.2 Credentials
+
+- **PAT** is used for GitLab API calls (discovery, metadata) only. Stored locally in `~/.baize/config.json` (chmod 600, plaintext acceptable in V0.1). **Hard rule: the PAT must never appear in logs or audit records.** Required scopes: `read_api` (TBC whether `read_repository` is needed given §7.3).
+- Phase 1 deliberately does not harden credential storage further (no keychain integration).
+
+### 7.3 Clone and fetch
+
+- Uses **system git with the user's ambient credentials** (SSH agent / git credential helper). BaiZe does not embed the PAT into remote URLs.
+- Assumes the user's git access is already configured. On authentication failure (HTTP 401 or SSH auth error):
+  - mark the repo `needs-auth`,
+  - back off exponentially (don't retry every poll cycle),
+  - surface a clear remediation hint in the UI (check git credentials / token).
+- If the PAT itself fails at the GitLab API (401 during discovery), raise a single global prompt in the UI.
+
+### 7.4 Mirror layout
+
+- **Bare mirrors** under `~/.baize/repos/`, no worktrees.
+- Consequence: "open in local IDE" deep links are out of scope for V0.1.
+
+### 7.5 Synchronization
+
+- **Scheduled polling** (configurable interval) + **manual "sync now"** per repo and globally.
+- Webhooks are **not viable** for a NAT'd local machine and are deferred to the [Enterprise] form.
+- Per-repo pipeline:
+
+```text
+discover -> clone -> fetch -> detect new revision -> enqueue index job -> incremental CBM index
+```
+
+- Requirements: retry with backoff, idempotency, per-repo state, last-indexed-commit tracking, no duplicate indexing jobs.
+- Group handling in Phase 1: recursive traversal, pull everything. No special handling for archived repos, size caps, LFS, or submodules beyond the onboarding disk estimate (revisit when the first real incident happens).
+
+## 8. Core Product Capabilities
+
+### 8.1 Code Q&A
+
+Users can ask natural-language questions about any repository visible to their credentials:
+
+- implementation lookup,
+- architecture questions,
+- cross-repository flow tracing (see §8.2 caveat),
+- dependency analysis,
+- symbol relationships,
+- change impact,
+- technology inventory,
+- service ownership discovery,
+- business-flow investigation.
+
+### 8.2 Cross-Repository Understanding — hypothesis, pending Phase 0 validation
+
+BaiZe aims to identify relationships that cross repository boundaries, including:
+
+- HTTP calls, gRPC calls, GraphQL,
+- protobuf/schema references,
+- shared libraries,
+- Kafka / message-bus producers and consumers,
+- database access, event flows, service dependencies.
+
+**Status: unproven.** No confirmed mechanism in CBM links e.g. a Kafka producer in repo A to a consumer in repo B (candidate approaches: topic-name string correlation, proto file fingerprinting, client/server URL matching, org conventions encoded in BaiZe Skills). Phase 0 (§17) must measure what CBM actually delivers before this section reads as a product commitment.
+
+### 8.3 Evidence and Citations
+
+Every material answer should include enough evidence to verify it:
+
+- repository, branch/revision where possible,
+- file path, line range, symbol,
+- related graph edge or dependency.
+
+### 8.4 Change Impact Analysis
+
+Given a symbol, file, API, schema, topic, or diff: identify direct and transitive dependents, affected repositories, blast-radius classification, and supporting evidence. (Subject to CBM capability validation, §17.)
+
+### 8.5 Architecture Exploration
+
+Users should be able to ask: What are the major services in domain X? Show the dependencies of service Y. Trace business flow Z. Which repositories belong to this subsystem?
+
+Interactive graph rendering in the UI is an **eventual** capability, not MVP.
+
+## 9. BaiZe Skills
+
+BaiZe ships Agent Skills that encode code-research strategies rather than duplicating intelligence engines. Skills are **static documents loaded by the agent** (prompt assets shipped in the npm package), not services in the request path.
+
+Examples:
+
+- `cross-repo-investigation` — tracing a behavior across repositories.
+- `impact-analysis` — combining symbol graph, code search, API/schema usage, and repo relationships.
+- `architecture-analysis` — inferring system boundaries and producing architecture-level answers.
+- `event-flow-analysis` — tracing Kafka/message-bus producer → consumer chains.
+- `evidence-validation` — requiring sufficient source evidence before presenting a conclusion.
+
+Per-organization customization of Skills: [Enterprise].
+
+## 10. Non-Goals for V0.1
+
+BaiZe will NOT initially build:
+
+- a new AST parser, LSP implementation, vector database, knowledge-graph engine, code-search engine, or LLM gateway,
+- an autonomous coding agent, or a replacement for OMP/pi,
+- a Sourcegraph/Sourcebot clone,
+- multi-user support or any ACL beyond credential delegation,
+- webhook-driven sync, non-GitLab SCM support,
+- worktrees / local-IDE deep links,
+- hardened credential storage (keychain etc.).
+
+## 11. MVP Deliverables
+
+1. `npx baize` single-command startup on a clean machine with only Node.js + git.
+2. Web setup wizard: GitLab URL + PAT + group/repo selection with disk estimate.
+3. Fleet sync: polling + manual, per-repo branch config, bare mirrors, `needs-auth` handling.
+4. CBM indexing of selected repositories; OMP answers cross-repository questions with source citations in the BaiZe UI.
+5. Benchmark run (§15) with answer-quality and performance metrics report.
+6. _Optional_: Tauri desktop shell (§6.5).
+
+## 12. Indexing Model and Scale Milestones
+
+Scale milestones (renamed from "Phase 1/2/3" in v0.1 to avoid clashing with §18's development phases):
+
+| Milestone | Scope | Form |
+| --------- | ----- | ---- |
+| S1 | 20 repos | Personal |
+| S2 | 100 repos | Personal |
+| S3 | 200 repos | Personal stretch — validate before committing |
+| S4 | 500 repos | [Enterprise] |
+| S5 | 800+ repos | [Enterprise] |
+
+Measure at each milestone:
+
+- initial indexing throughput, incremental indexing latency,
+- DB/index size, CPU, memory, disk I/O,
+- query latency, concurrent query behavior.
+
+Sharding strategies ([Enterprise], if required):
+
+- **Repository hash**: `hash(repo_id) % N` — simple but weak for cross-repo locality.
+- **Business-domain grouping** (preferred where feasible): keep heavily related repositories (e.g. `trading: gateway, order-service, risk, matching, clearing`) in the same graph shard.
+
+## 13. Enterprise Form [Enterprise] — future
+
+> Everything in this section is out of MVP scope. It is preserved from v0.1 as the direction for the shared/central deployment; build only what Personal-form scale validation proves necessary.
+
+### 13.1 Target architecture
+
+```text
+                            BaiZe UI
+                               |
+                              ACP
+                               |
+                              OMP
+                               |
+                              MCP
+                               |
+                    +----------v----------+
+                    |    BaiZe Gateway    |
+                    | Auth / ACL          |
+                    | Repo Scope          |
+                    | Query Routing       |
+                    | Fan-out / Merge     |
+                    | Audit               |
+                    +----------+----------+
+                               |
+                  +------------+------------+
+                  |                         |
+                Zoekt               CBM Shards
+          Global Recall/Search     Code Understanding
+                  |                         |
+             800+ repos          selected repo groups
+```
+
+Zoekt is optional; introduce only if global full-text search through CBM misses latency or recall targets.
+
+### 13.2 Enterprise fleet
+
+- Multi-SCM discovery: GitHub/GHE, GitLab, Bitbucket, Azure DevOps/TFS, generic Git; org/group discovery, inclusion/exclusion rules, default-branch discovery, archived-repo handling, deleted-repo cleanup.
+- Event-driven updates via Git-provider webhooks → fleet controller → fetch → enqueue incremental index. Periodic reconciliation remains the fallback.
+
+### 13.3 Query routing
+
+The gateway exposes a stable MCP surface independent of engine topology. Example logical tools: `search_code`, `search_symbols`, `read_code`, `find_definition`, `find_references`, `get_callers`, `get_callees`, `trace_path`, `impact_analysis`, `get_architecture`, `list_repositories`. OMP should not need to know infrastructure topology.
+
+Migration note: in the Personal form, OMP uses CBM's native tool surface directly, and BaiZe Skills are written against it. Introducing the gateway's logical surface later means revising the Skills — accepted as a deliberate incremental-scale trade-off.
+
+### 13.4 Optional two-stage retrieval
+
+If global retrieval at 800+ repos becomes the bottleneck:
+
+1. **Recall** — Zoekt: which repos/files are likely relevant (fast, global, cheap).
+2. **Understanding** — CBM on the selected repos only: symbols, graph traversal, callers/callees, impact.
+3. **Reasoning** — OMP synthesizes evidence into the final answer.
+
+### 13.5 Authentication and authorization [Enterprise]
+
+A user must never receive code or derived knowledge from repositories they cannot access. Authorization must be enforced before search, file retrieval, graph traversal, cross-repo fan-out, architecture responses, and answer generation. Potential sources: GitHub/GitLab permissions, internal IAM, manually managed repo groups.
+
+(Contrast with the Personal form, §3.1: authorization is delegated to the user's own SCM credentials, and all components run as that user.)
+
+### 13.6 Audit [Enterprise]
+
+Record: requesting user, timestamp, repositories queried, MCP tools invoked, query metadata, returned repo scope, denied access, indexing/admin operations. Avoid logging full sensitive source payloads by default (the PAT/logging rule in §7.2 applies in all forms).
+
+### 13.7 Observability [Enterprise]
+
+Recommended metrics once the shared form exists:
+
+- **Fleet**: total/healthy/stale repos, sync failures, last successful fetch, webhook lag.
+- **Indexing**: queue depth, active jobs, duration, failures, indexed LOC/files, last indexed commit, incremental latency.
+- **Query**: QPS, P50/P95/P99, fan-out width, per-engine latency, result counts, MCP error rate.
+- **Resources**: CPU, memory, disk, SQLite/WAL size, open files, worker concurrency.
+
+The Personal form needs only a minimal subset visible in the UI: per-repo sync/index state, last indexed commit, index size on disk.
+
+### 13.8 Availability and concurrency [Enterprise]
+
+Initial: stable central service, controlled indexing concurrency, multiple simultaneous users, no duplicate indexing work, query availability during background indexing. Later: gateway replicas, shard health checks, query failover, distributed index workers, zero-downtime upgrades.
+
+## 14. Evaluation Dataset
+
+Create at least 50–100 real engineering questions against the organization's own GitLab estate, covering:
+
+1. code location,
+2. caller/callee,
+3. cross-repo service flow,
+4. event/Kafka tracing,
+5. architecture,
+6. dependency inventory,
+7. change impact,
+8. business-logic explanation,
+9. ambiguous debugging questions,
+10. organization-wide code inventory.
+
+Each question must have a human-reviewed expected answer or evidence set, including a **labeled set of relevant repositories** (needed for the recall metric, §15).
+
+## 15. Success Metrics
+
+### Answer quality
+
+- **≥ 80% useful-answer rate** on the MVP benchmark. _Method_: two human reviewers rate each answer against a rubric (useful = substantively correct + evidence-backed + actionable); disagreements resolved by a third reviewer.
+- **≥ 90% of material claims backed by valid source evidence.** _Method_: automated check that each citation resolves (file/line range exists at the indexed revision) + human sampling of claim↔evidence entailment.
+- **Low hallucination rate.** _Method_: rate of material claims contradicted by their cited evidence. Numeric threshold set after the first benchmark run (v0.1 had no method and no number).
+
+### Retrieval
+
+- **Relevant-repository recall ≥ 95%** on benchmark questions. _Method_: measured against the human-labeled relevant-repo sets in the evaluation dataset.
+- No unauthorized-repository leakage. _Personal form_: holds by construction (credential delegation, §3.1); verified by confirming the indexed repo set matches the PAT's visible set.
+
+### Scale
+
+- Personal form: S1–S2 milestones with acceptable indexing latency and UI responsiveness; exact SLOs defined after the first scale benchmark.
+- Enterprise form: 800+ repos, tens of millions to 100M+ LOC, incremental updates without full re-index, practical concurrency — SLOs defined at Phase 3.
+
+## 16. Development Phases
+
+(Renumbered and deduplicated against v0.1; scale milestones now live in §12.)
+
+### Phase 0 — Technical validation
+
+- Run the CBM validation checklist (§17).
+- Panda-derived UI + OMP + CBM chain working end-to-end on 5–20 repositories.
+- Confirm basic answer quality informally.
+
+### Phase 1 — MVP / real PoC
+
+- §11 deliverables on 50–100 repositories (milestone S2).
+- Benchmark question set executed with measurement methods (§15).
+- Indexing and query metrics collected.
+
+### Phase 2 — Personal-form scale validation
+
+- 200 repos (S3); attempt 500 (S4) only if S3 is comfortable.
+- Stress indexing and queries; measure storage and WAL behavior.
+- Decide whether the Personal form has a hard ceiling and what triggers the Enterprise form.
+
+### Phase 3 — Enterprise layer [Enterprise]
+
+Only proven gaps: gateway/routing, fleet controller with webhooks, multi-SCM, sharding, ACL, audit, observability.
+
+### Phase 4 — Optional Zoekt [Enterprise]
+
+Only if global retrieval through CBM fails latency/recall targets.
+
+## 17. Phase 0 — CBM Technical-Validation Checklist
+
+Each item has a pass criterion; failure triggers a documented fallback decision (wrap, patch, or replace).
+
+| # | Question | Method | Pass criterion |
+| - | -------- | ------ | -------------- |
+| 1 | **Distribution/runtime**: can a Node process spawn CBM as an MCP stdio server with no non-Node runtime to install? | Clean-machine test: Node + git only | `npx baize` indexes a repo end-to-end; if CBM needs Python/other runtime, a viable auto-download/uvx path is documented |
+| 2 | **Multi-repo store**: can one CBM instance hold multiple repositories with repo-scoped queries? | Index 20 repos into one store; run scoped and unscoped queries | Queries correctly scope by repo; no cross-contamination of results |
+| 3 | **Cross-repo relationships**: does CBM link anything across repos (Kafka topics, proto imports, HTTP/gRPC client-server)? | Index 3–5 repos with known cross-repo links; query for each known link | Report hit-rate per relationship type; threshold set at first run — the number itself is the deliverable |
+| 4 | **Incremental indexing**: does a push trigger index update without full re-index? | Push a representative commit; measure latency and changed-work scope | Incremental latency in seconds-to-minutes; no full re-index |
+| 5 | **Scale smoke**: size/time/memory for 20 representative repos | Measure during item 2 | Numbers recorded as S1 baseline; no runaway WAL/disk growth |
+| 6 | **Query latency**: P50/P95 on a fixed 20-question probe set | Script the probes against the MCP tools | Latencies recorded; flag anything P95 > 5s for investigation |
+| 7 | **Desktop sidecar feasibility**: can the baize server be packaged as a Node SEA sidecar that still spawns child processes (git, CBM)? | Build a SEA binary; spawn git and CBM from it | Works on macOS unsigned/dev-signed; Windows/Linux assessed |
+
+## 18. Key Technical Risks
+
+### CBM distribution/runtime (new)
+
+CBM may not be spawnable from Node without extra runtimes. _Mitigation_: Phase 0 item 1; fallbacks include pinned-binary download or `uvx`, at the cost of the "clean machine" promise.
+
+### CBM capability gap (new)
+
+Cross-repo relationships, architecture queries, or impact analysis may be partial or absent (§8.2). _Mitigation_: Phase 0 item 3 quantifies the gap; BaiZe Skills and search-augmented investigation compensate where static analysis falls short; worst case re-scopes §8.2/§8.4 commitments.
+
+### CBM serverization maturity
+
+CBM is primarily a local MCP/code-memory engine, not an enterprise multi-tenant cluster. _Mitigation_ (Enterprise form): isolate behind the gateway, hide topology from agents, shard if necessary.
+
+### SQLite concurrency / WAL growth
+
+Large indexing workloads with concurrent readers/writers may create database pressure. _Mitigation_: bound indexing concurrency, monitor WAL/checkpoint behavior, benchmark at each scale milestone.
+
+### Cross-repository graph quality
+
+Static analysis cannot always infer dynamic service relationships. _Mitigation_: combine graph evidence with search; encode organization-specific conventions in BaiZe Skills; let Skills guide agent investigation.
+
+### Git credential UX (new)
+
+Ambient git auth fails in varied ways (SSH agent not loaded, credential helper missing, expired PAT). _Mitigation_: `needs-auth` state + actionable UI remediation (§7.3); keep failure modes enumerated in docs as they are encountered.
+
+### ACL leakage through derived results [Enterprise]
+
+Graph relationships can indirectly expose restricted repository information. _Mitigation_: authorization at evidence/result level; filter traversal by authorized repo scope. Personal form: holds by construction (§3.1).
+
+## 19. Open Questions
+
+Resolved in v0.2: deployment form (§3); repo onboarding (Fleet in MVP, §7); branch policy (default branch, per-repo override, §7.1); ACL in Personal form (credential delegation, §3.1); UI source (Panda-derived, §6.3).
+
+Remaining, each annotated with what it blocks:
+
+1. Can a single CBM store reliably support the target estate? — **blocks Phase 3 design**; informed by §17 items 2/5.
+2. What is the optimal shard size? — Phase 3.
+3. How well does CBM resolve Go/Rust/Java/TypeScript cross-repo relationships? — **Phase 0, §17 item 3**.
+4. How should generated/vendor code be excluded? — Phase 1 (needed for honest index-size numbers).
+5. ~~Branch policy~~ — resolved (§7.1).
+6. Is Zoekt required for global retrieval? — Phase 4 decision point.
+7. What concurrency is expected from engineering teams? — Phase 3.
+8. How should repo ACLs be synchronized from SCM systems? — Phase 3.
+9. Do we need PR/Issue/ADR context in V1, or only source code? — Phase 3 scoping.
+10. Should architecture graph state be persisted separately from CBM? — Phase 3.
+11. What is the canonical name and provenance of "OMP/pi"? — **documentation debt; blocks finalizing §5 and the architecture diagrams**.
+12. Which GitLab PAT scopes are minimally sufficient (`read_api` ± `read_repository`)? — Phase 0, alongside §17 item 1.
+
+## 20. Current Recommended Direction
+
+Build the **Personal form** first:
+
+```text
+npx baize  =  BaiZe UI (Panda-derived) + OMP/pi + CBM + GitLab fleet
+```
+
+Do **not** build a custom BaiZe code-intelligence backend, and do not build the enterprise layer until Personal-form scale validation proves the gaps.
+
+The expected long-term role of BaiZe is:
+
+> **Fleet, security, routing, and agent-skills layer around reusable open-source code-intelligence engines — starting as a single-user local tool and growing into the enterprise control plane only where reality demands it.**

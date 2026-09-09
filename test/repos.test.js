@@ -82,6 +82,21 @@ test('add(): colliding names get a unique suffix; explicit name respected', asyn
   }
 })
 
+test('add(): re-submitting a registered path returns the existing entry, no duplicate', async () => {
+  const home = tempHome()
+  try {
+    const { registry, config } = makeRegistry(home)
+    const fixture = gitFixture(join(home, 'svc'))
+    const first = registry.add(fixture)
+    const second = registry.add(fixture, 'other-name')
+    assert.equal(second.name, first.name)
+    assert.equal(second.alreadyRegistered, true)
+    assert.deepEqual(Object.keys(config.repos), [first.name])
+  } finally {
+    cleanupHome(home)
+  }
+})
+
 test('reindex() while indexing collapses into the running job', async () => {
   const home = tempHome()
   try {

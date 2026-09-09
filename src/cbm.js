@@ -25,7 +25,9 @@ export function resolveCbmBinary() {
   if (!existsSync(binPath)) {
     throw new Error(
       `CBM binary missing at ${binPath}. ` +
-        'The postinstall download was skipped or failed — run: npm rebuild codebase-memory-mcp',
+        'The postinstall download was skipped or failed. Remedy (online): ' +
+        'npx codebase-memory-mcp --version  — then restart baize; ' +
+        'or npm rebuild codebase-memory-mcp; offline: pre-seed the binary at the path above.',
     )
   }
   return binPath
@@ -90,17 +92,32 @@ export class CbmSupervisor {
       }
     })
     child.on('exit', (code, signal) => this.#onExit(code, signal))
+    // Spawn failures (EACCES/ENOENT race/ENOEXEC) fire 'error', not 'exit' —
+    // without this listener they would crash the whole baize process.
+    child.on('error', (err) => {
+      this.logger?.error(`cbm: spawn/stream error: ${err.message}`)
+      this.#onExit(err.code ?? '?', null)
+    })
     // EPIPE on a dying child must not crash the process; the exit handler owns cleanup.
     child.stdin.on('error', (err) => this.logger?.warn(`cbm: stdin error: ${err.message}`))
 
+    this.everStarted = true
     this.logger?.info(`cbm: spawned ${this.#binaryPath()} (cache: ${this.cacheDir})`)
-    this.ready = this.#handshake().then(() => {
-      // The child can die mid-handshake without a pending request noticing.
-      if (child.exitCode !== null) {
+    this.ready = this.#handshake()
+      .then(() => {
+        // The child can die mid-handshake without a pending request noticing.
+        if (child.exitCode !== null) {
+          throw new Error('cbm: process exited during handshake')
+        }
+      })
+      .catch((err) => {
+        // A wedged-rejected ready would poison every future call (ensure()
+        // early-returns it). Reset and kill the child so the next call
+        // starts fresh instead of hanging forever.
         this.ready = null
-        throw new Error('cbm: process exited during handshake')
-      }
-    })
+        if (child.exitCode === null) child.kill('SIGTERM')
+        throw err
+      })
     return this.ready
   }
 
@@ -109,7 +126,7 @@ export class CbmSupervisor {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: {},
       clientInfo: { name: 'baize', version: '0.0.1' },
-    })
+    }, { timeoutMs: 30000 })
     this.#send({ jsonrpc: '2.0', method: 'notifications/initialized' })
     this.logger?.info(`cbm: connected (server ${result?.serverInfo?.name ?? '?'} ${result?.serverInfo?.version ?? '?'})`)
   }
@@ -122,10 +139,13 @@ export class CbmSupervisor {
   async stop() {
     this.stopping = true
     const child = this.child
+    if (!this.everStarted) {
+      // Never spawned anything: there is no daemon of ours to stop, and the
+      // daemon-stop subprocess costs ~6s of its own startup — skip it.
+      return
+    }
     if (!child || child.exitCode !== null) {
-      // Nothing running from this supervisor. Reaping a leftover daemon from
-      // an earlier run is best-effort — skip silently when the binary itself
-      // is unresolvable (nothing we could have started).
+      // Child already gone; still reap a possible leftover daemon.
       try {
         await this.#stopDaemon()
       } catch (err) {
@@ -151,6 +171,14 @@ export class CbmSupervisor {
       encoding: 'utf8',
     })
     const out = `${result.stdout ?? ''}${result.stderr ?? ''}`.trim()
+    if (result.error || result.status !== 0) {
+      // A daemon that refused to stop is exactly the orphan-daemon failure
+      // mode #8 exists to prevent — log it loudly, not as routine INFO.
+      this.logger?.warn(
+        `cbm: daemon stop failed (status=${result.status ?? 'n/a'}${result.error ? ` error=${result.error.message}` : ''}): ${out}`,
+      )
+      return
+    }
     this.logger?.info(`cbm: daemon stop -> ${out || 'ok'}`)
   }
 

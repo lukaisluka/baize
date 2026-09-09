@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { request } from 'node:http'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
@@ -13,7 +14,7 @@ const registry = {
   list: async () => [
     { name: 'svc', path: '/x/svc', status: 'ready', stats: { nodes: 6, edges: 9 } },
   ],
-  add: async () => {},
+  add: () => ({ name: 'new', path: '/x/new' }),
 }
 const server = createBaizeServer({ logger, registry })
 const bound = await listen(server, { port: 0 })
@@ -69,6 +70,42 @@ test('POST /api/repos with invalid JSON body is a 400', async () => {
   })
   assert.equal(res.status, 400)
   assert.match((await res.json()).error, /JSON/)
+})
+
+test('POST /api/repos with a valid path returns 201 with the repo entry', async () => {
+  const res = await fetch(new URL('/api/repos', base), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path: '/x/new' }),
+  })
+  assert.equal(res.status, 201)
+  assert.deepEqual(await res.json(), { name: 'new', path: '/x/new' })
+})
+
+test('POST /api/repos without JSON content-type is a 415 (cross-site text/plain guard)', async () => {
+  const res = await fetch(new URL('/api/repos', base), {
+    method: 'POST',
+    headers: { 'content-type': 'text/plain' },
+    body: JSON.stringify({ path: '/x/new' }),
+  })
+  assert.equal(res.status, 415)
+})
+
+test('API requests with a non-local Host header are rejected (DNS-rebinding guard)', async () => {
+  // fetch (undici) forbids overriding Host, so speak raw HTTP for this one.
+  const { port } = new URL(base)
+  const status = await new Promise((resolve, reject) => {
+    const req = request(
+      { host: '127.0.0.1', port, path: '/api/repos', headers: { Host: 'evil.example.com' } },
+      (res) => {
+        res.resume()
+        res.on('end', () => resolve(res.statusCode))
+      },
+    )
+    req.on('error', reject)
+    req.end()
+  })
+  assert.equal(status, 403)
 })
 
 test('unknown paths get a JSON 404', async () => {

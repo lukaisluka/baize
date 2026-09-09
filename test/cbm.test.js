@@ -132,6 +132,34 @@ test('stop(): SIGTERM child, then daemon stop; exit path tolerates already-dead 
   await cbm.stop()
 })
 
+test("spawn 'error' (EACCES/ENOENT) rejects pending calls instead of crashing", { timeout: 10000 }, async () => {
+  const { cbm, children } = makeSupervisor()
+  const promise = cbm.call('list_projects', {})
+  const child = children[0]
+  // Real Node fires 'error' (not 'exit') when spawn fails.
+  child.emit('error', Object.assign(new Error('spawn EACCES'), { code: 'EACCES' }))
+  await assert.rejects(promise, /exited \(code EACCES/)
+})
+
+test('handshake failure resets state; the next call respawns cleanly', { timeout: 10000 }, async () => {
+  const { cbm, children } = makeSupervisor()
+  const promise = cbm.call('list_projects', {})
+  const child = children[0]
+  // JSON-RPC-level error during initialize: child still alive, no 'exit'.
+  const initId = child.request(0).id
+  child.stdoutLine({ jsonrpc: '2.0', id: initId, error: { code: -32603, message: 'nope' } })
+  await assert.rejects(promise, /initialize: nope|nope/)
+  // Handshake failure kills the child so ensure() can't wedge on it.
+  assert.ok(child.killed.includes('SIGTERM'))
+
+  const retry = cbm.call('list_projects', {})
+  const second = children[1]
+  second.reply(0, handshakeResult)
+  await settle()
+  second.reply(2, { structuredContent: { ok: true } })
+  assert.deepEqual(await retry, { ok: true })
+})
+
 test('unparseable stdout lines are warned, not fatal', { timeout: 10000 }, async () => {
   const warnings = []
   const children = []

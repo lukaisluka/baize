@@ -127,13 +127,17 @@ function sendJson(res, status, payload) {
 
 const MAX_BODY_BYTES = 1024 * 1024
 
+// Respond 413 instead of destroying the socket (a destroyed socket surfaces
+// as ECONNRESET on the client, hiding the real status). The request is
+// paused so the oversized body is never buffered.
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let body = ''
     req.on('data', (chunk) => {
       body += chunk
       if (body.length > MAX_BODY_BYTES) {
-        req.destroy()
+        req.pause()
+        req.removeAllListeners('data')
         reject(Object.assign(new Error('request body too large'), { statusCode: 413 }))
       }
     })
@@ -148,7 +152,19 @@ function readJsonBody(req) {
   })
 }
 
+// The API binds 127.0.0.1 only, but browsers happily send cross-site requests
+// to localhost: a hostile page can POST text/plain (no preflight) and make
+// baize index arbitrary local paths, and DNS rebinding can forge the Host.
+// Require an explicit local Host and, for writes, a JSON content-type.
+function isLocalHostHeader(host) {
+  return /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host ?? '')
+}
+
 async function handleApi(req, res, path, { registry }) {
+  if (!isLocalHostHeader(req.headers.host)) {
+    return sendJson(res, 403, { error: 'forbidden: non-local Host header' })
+  }
+
   if (req.method === 'GET' && path === '/api/health') {
     return sendJson(res, 200, { status: 'ok' })
   }
@@ -158,6 +174,10 @@ async function handleApi(req, res, path, { registry }) {
   }
 
   if (req.method === 'POST' && path === '/api/repos') {
+    const contentType = req.headers['content-type'] ?? ''
+    if (!contentType.startsWith('application/json')) {
+      return sendJson(res, 415, { error: 'content-type must be application/json' })
+    }
     const body = await readJsonBody(req)
     if (typeof body.path !== 'string' || !body.path.trim()) {
       return sendJson(res, 400, { error: 'field "path" (absolute git repo path) is required' })

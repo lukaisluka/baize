@@ -12,9 +12,21 @@ function slugify(path) {
 
 // A git repo for CBM purposes is anything `git rev-parse --git-dir` accepts —
 // work trees and the bare mirrors that fleet sync (#12) will create alike.
-function isGitRepo(path) {
+// Distinguishes "not a repo" (400) from "git missing" (500) so the real
+// cause is never masked.
+function checkGitRepo(path) {
   const result = spawnSync('git', ['-C', path, 'rev-parse', '--git-dir'], { encoding: 'utf8' })
-  return result.status === 0
+  if (result.error) {
+    const err = new Error(`git is not available: ${result.error.message}`)
+    err.statusCode = 500
+    return err
+  }
+  if (result.status !== 0) {
+    const err = new Error(`not a git repository: ${path}`)
+    err.statusCode = 400
+    return err
+  }
+  return null
 }
 
 // Repo registry + one background index job per repo. Registered repos live in
@@ -33,8 +45,8 @@ export function createRepoRegistry({ config, save, logger, cbm }) {
   }
 
   // Fire-and-forget: kicks the index job if one is not already running for the
-  // repo. Duplicate submissions (double POST, restart racing a poll) collapse
-  // into the running job instead of enqueuing a second index.
+  // repo. Re-submissions while a job runs (reindex, re-POST of a registered
+  // path) collapse into the running job instead of enqueuing a second index.
   function kickIndex(name) {
     const job = jobs.get(name)
     if (job?.status === 'indexing') return job
@@ -62,11 +74,18 @@ export function createRepoRegistry({ config, save, logger, cbm }) {
 
   function add(rawPath, rawName) {
     const path = isAbsolute(rawPath) ? rawPath : resolve(rawPath)
-    if (!isGitRepo(path)) {
-      const err = new Error(`not a git repository: ${path}`)
-      err.statusCode = 400
-      throw err
+    // Re-submitting a path already registered is a no-op returning the
+    // existing entry — never a second registry entry indexing the same tree.
+    const existing = Object.entries(config.repos).find(([, entry]) => entry.path === path)
+    if (existing) {
+      const [name] = existing
+      kickIndex(name)
+      return { name, path, alreadyRegistered: true }
     }
+
+    const failure = checkGitRepo(path)
+    if (failure) throw failure
+
     const base = typeof rawName === 'string' && rawName.trim() ? slugify(rawName) : slugify(path)
     const name = uniqueName(base)
     config.repos[name] = { path, addedAt: new Date().toISOString() }
@@ -81,12 +100,17 @@ export function createRepoRegistry({ config, save, logger, cbm }) {
     if (job) {
       return { ...base, status: job.status, error: job.error, stats: job.stats, indexedAt: job.indexedAt }
     }
-    // No local job (fresh restart): derive from CBM's own state. Only a real
-    // "not indexed" maps to unindexed — any other failure (CBM down, timeout)
-    // surfaces as an error rather than masquerading as a fresh repo.
+    // No local job (fresh restart): derive from CBM's own state. CBM's
+    // status field leads ('ready', or its own in-progress wording); only a
+    // real "not indexed" maps to unindexed — any other failure (CBM down,
+    // timeout) surfaces as an error rather than masquerading as a fresh repo.
     try {
       const status = await cbm.call('index_status', { project: name }, { timeoutMs: 30000 })
-      return { ...base, status: 'ready', stats: { nodes: status?.nodes, edges: status?.edges } }
+      return {
+        ...base,
+        status: status?.status ?? 'ready',
+        stats: { nodes: status?.nodes, edges: status?.edges },
+      }
     } catch (err) {
       if (/not found or not indexed/.test(err.message)) {
         return { ...base, status: 'unindexed' }

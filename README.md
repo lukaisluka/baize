@@ -36,13 +36,14 @@ local code graph; status and symbol/relation counts appear on the page and via
 
 The npm package `codebase-memory-mcp` downloads a static, checksum-verified
 binary from GitHub Releases at `npm install` time (postinstall — needs
-network). Offline / locked-down alternatives:
+network). BaiZe resolves the binary directly and fails fast with a remedy if
+it is missing. Offline / locked-down alternatives:
 
-- `npm install --ignore-scripts`: the binary is then downloaded lazily on
-  first use by the package's launcher.
+- After `npm install --ignore-scripts`, trigger the package's own one-time
+  download once: `npx codebase-memory-mcp --version` (its launcher downloads
+  the binary when absent). BaiZe itself never downloads at runtime.
 - Pre-seed `node_modules/codebase-memory-mcp/bin/codebase-memory-mcp` from an
-  internal mirror of a GitHub Release asset; BaiZe resolves the binary there
-  and fails fast with the remedy if it is missing.
+  internal mirror of a GitHub Release asset (keep the executable bit).
 
 CBM state lives under `~/.baize/index/` (`CBM_CACHE_DIR` is redirected there;
 one SQLite DB per indexed project).

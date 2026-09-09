@@ -2,7 +2,9 @@
 
 > Status: Draft
 > Product: BaiZe
-> Version: 0.2
+> Version: 0.2.1
+>
+> Changelog v0.2.1: folded in 2026-09-09 engine research — OMP identified as Oh My Pi; CBM capabilities verified against source (LSP wording, tool surface, cross-repo maturity, WAL/daemon risks); desktop-shell path changed from Node SEA to plain-Node sidecar.
 >
 > Changelog v0.2:
 > - Positioning split into **Personal form** (single-user local web tool, `npx baize`) and **Enterprise form** (later; 800+ repos, gateway/ACL/audit). Sections marked **[Enterprise]** are out of MVP scope.
@@ -69,7 +71,7 @@ Shared, centrally deployed control plane around the same engines: gateway, query
    - Reuse `codebase-memory-mcp` (CBM) for code parsing, symbol analysis, graph construction, semantic search, call graph, and impact analysis — subject to the Phase 0 validation in §17.
 
 3. **Agent and intelligence engine are separate**
-   - OMP/pi is responsible for reasoning and research loops.
+   - OMP is responsible for reasoning and research loops.
    - BaiZe provides organization-wide code context, and (later) routing, security, and orchestration.
 
 4. **Treat all repositories as one software system**
@@ -87,8 +89,9 @@ Shared, centrally deployed control plane around the same engines: gateway, query
 | ---- | ---------- |
 | **ACP** | Agent Client Protocol — JSON-RPC protocol between client UIs and agents (sessions, prompts, tool calls, permissions). Originated at Zed; TS SDK `@agentclientprotocol/sdk`. |
 | **MCP** | Model Context Protocol — tool interface between an agent and tool servers (here: between OMP and CBM). |
-| **OMP / pi** | The reasoning agent runtime BaiZe embeds: agent loop, tool selection, query decomposition, multi-step investigation, evidence aggregation, answer generation. _TBC: the two names are used interchangeably in early drafts; confirm the canonical name and whether it is a public project or an internal runtime._ |
-| **CBM** | `codebase-memory-mcp` — the open-source code-intelligence engine BaiZe reuses for indexing, parsing, search, graph, and the MCP tool surface. Capabilities to be confirmed per §17. |
+| **OMP** | [Oh My Pi](https://github.com/can1357/oh-my-pi) — the reasoning agent runtime BaiZe embeds (MIT): agent loop, tool selection, query decomposition, multi-step investigation, evidence aggregation, answer generation. A hard fork of pi with **native ACP** (`omp acp`) and **built-in MCP support** — the two properties BaiZe's chain requires. TypeScript agent layer over a Rust core. |
+| **pi** | The original agent harness ([earendil-works/pi](https://github.com/earendil-works/pi), formerly badlogic/pi-mono), MIT, embeddable via SDK. No native ACP or MCP (community adapters exist), so OMP is the default; pi remains a fallback via adapters. |
+| **CBM** | `codebase-memory-mcp` — the open-source code-intelligence engine BaiZe reuses ([DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp), MIT, single static binary: pure C with vendored tree-sitter + SQLite). Capabilities per §6.1 and §17. |
 | **Zoekt** | Trigram-based code-search engine; optional global recall layer in the Enterprise form only. |
 | **Fleet** | BaiZe's repository management: discovery, synchronization, and indexing orchestration. |
 | **BaiZe Skills** | Static Agent Skill documents loaded by the agent that encode investigation strategies. They are prompt/configuration assets, **not a runtime call-chain hop**. |
@@ -122,19 +125,23 @@ baize CLI — single Node.js process (`npx baize`), binds 127.0.0.1 only
 - Indexing progress and error/status reporting
 - _Eventual_: architecture/dependency graph visualization, research-progress visualization (not MVP)
 
-**OMP / pi**
+**OMP** (Oh My Pi)
 
 - Agent loop, tool selection, query decomposition
 - Multi-step investigation and evidence aggregation
 - Final answer generation; optional sub-agents
+- Runs with the permissions of the launching process (no built-in sandbox) and has install/update telemetry (documented opt-out) — acceptable in the Personal form, to be documented for Enterprise
 
-**CBM (`codebase-memory-mcp`)**
+**CBM (`codebase-memory-mcp`)** — MIT, single static binary (pure C, vendored tree-sitter + SQLite compiled in)
 
-- Repository indexing, tree-sitter parsing, LSP-assisted symbol resolution where available
-- Full-text / BM25 search, semantic search
-- Code graph, callers / callees, change-impact analysis
-- MCP tool interface
-- Cross-repository relationships and architecture queries are a **hypothesis to validate** (§17), not a confirmed capability
+- Repository indexing, tree-sitter parsing (158 vendored grammars), **LSP-grade type resolution reimplemented in-engine** for 9 language families (Go/Rust/Java/TypeScript included, "Good" 75–89% quality tier) — no language-server processes involved
+- Full-text / BM25 search (SQLite FTS5); semantic search via **bundled on-device embeddings** (nomic-embed-code, no API key — fits the self-hosted principle)
+- Code graph, callers / callees (`trace_path`), change-impact analysis (`detect_changes`)
+- MCP tool interface (17 tools as of v0.10.8 — README/docs lag the source; always verify against the pinned version)
+- **Cross-repository relationships exist but are immature**: `cross-repo-intelligence` mode writes `CROSS_HTTP_CALLS` / `CROSS_ASYNC_CALLS` / `CROSS_GRPC_CALLS` / etc. edges bidirectionally into both project DBs, with known false positives and missed edges (upstream issues #523, #1459, #953, #706); Kafka-class async-topic matching is partial. §8.2 remains a hypothesis to quantify in Phase 0 (§17).
+- Storage: one SQLite DB (WAL mode) per project under `CBM_CACHE_DIR` (BaiZe points it at `~/.baize/index/`); cross-DB queries are blocked, so cross-repo edges are duplicated into both DBs
+- A per-account background daemon serves multiple MCP clients; its lifecycle should be owned and supervised by the baize CLI (see §18)
+- Distribution: the npm package downloads the static binary from GitHub Releases at postinstall (needs network); for locked-down environments BaiZe pre-bundles or mirrors the binary
 
 **baize CLI (orchestrator)**
 
@@ -182,7 +189,9 @@ baize/
 ### 6.5 Optional desktop shell (Phase 1+, not MVP-critical)
 
 - **Tauri** shell derived from Panda's `desktop/src-tauri`.
-- Shell responsibilities only: spawn the baize CLI as a **sidecar** (packaged via Node SEA — feasibility to be validated in Phase 0) and load the local UI in the system webview.
+- Shell responsibilities only: spawn the baize server as a **sidecar** and load the local UI in the system webview.
+- **Sidecar packaging: a plain per-platform Node binary + bundled JS** (the pattern Tauri's docs describe; runtime semantics identical to `npx baize`, `fork`/`spawn` children unaffected). Node SEA is second-choice: still Stability 1.1, and `child_process.fork()` is broken by design in SEA binaries. `bun build --compile` is rejected — runtime divergence from the npm CLI is a support risk.
+- The shell must kill the whole **process tree** on quit (Tauri does not kill sidecar children); the server handles SIGTERM by cleaning up its own children.
 - Shares 100% of UI and server code with the `npx` form; adds packaging/signing/notarization pipeline cost, so it ships after the `npx` form is proven.
 
 ## 7. Repository Management (Fleet — MVP scope)
@@ -292,7 +301,7 @@ Per-organization customization of Skills: [Enterprise].
 BaiZe will NOT initially build:
 
 - a new AST parser, LSP implementation, vector database, knowledge-graph engine, code-search engine, or LLM gateway,
-- an autonomous coding agent, or a replacement for OMP/pi,
+- an autonomous coding agent, or a replacement for OMP,
 - a Sourcegraph/Sourcebot clone,
 - multi-user support or any ACL beyond credential delegation,
 - webhook-driven sync, non-GitLab SCM support,
@@ -329,7 +338,7 @@ Measure at each milestone:
 Sharding strategies ([Enterprise], if required):
 
 - **Repository hash**: `hash(repo_id) % N` — simple but weak for cross-repo locality.
-- **Business-domain grouping** (preferred where feasible): keep heavily related repositories (e.g. `trading: gateway, order-service, risk, matching, clearing`) in the same graph shard.
+- **Business-domain grouping** (preferred where feasible): keep heavily related repositories (e.g. `trading: gateway, order-service, risk, matching, clearing`) in the same graph shard. This matches CBM's storage model: cross-DB queries are blocked and cross-repo edges are duplicated into both project DBs, so domain-grouped shards lose no edges.
 
 ## 13. Enterprise Form [Enterprise] — future
 
@@ -480,31 +489,36 @@ Each item has a pass criterion; failure triggers a documented fallback decision 
 
 | # | Question | Method | Pass criterion |
 | - | -------- | ------ | -------------- |
-| 1 | **Distribution/runtime**: can a Node process spawn CBM as an MCP stdio server with no non-Node runtime to install? | Clean-machine test: Node + git only | `npx baize` indexes a repo end-to-end; if CBM needs Python/other runtime, a viable auto-download/uvx path is documented |
+| 1 | **Distribution/runtime**: CBM's static binary (npm postinstall, confirmed) and OMP can both be spawned and supervised by the baize CLI — incl. CBM daemon lifecycle ownership and OMP's own runtime requirement (Bun vs prebuilt binary, to be confirmed) | Clean-machine test: Node + git only | `npx baize` indexes a repo and answers a question end-to-end (exercises OMP spawn + CBM spawn + UI); offline/locked-down install path via pre-bundled or mirrored binaries documented |
 | 2 | **Multi-repo store**: can one CBM instance hold multiple repositories with repo-scoped queries? | Index 20 repos into one store; run scoped and unscoped queries | Queries correctly scope by repo; no cross-contamination of results |
-| 3 | **Cross-repo relationships**: does CBM link anything across repos (Kafka topics, proto imports, HTTP/gRPC client-server)? | Index 3–5 repos with known cross-repo links; query for each known link | Report hit-rate per relationship type; threshold set at first run — the number itself is the deliverable |
+| 3 | **Cross-repo relationships**: quantify CBM's `cross-repo-intelligence` mode per relationship type — HTTP routes, gRPC, GraphQL, async topics (**Kafka explicitly; upstream matching is partial**), proto imports | Index 3–5 repos with known cross-repo links; run `index_repository` in `cross-repo-intelligence` mode with `target_projects`; query for each known link | Hit-rate **and false-positive rate** per relationship type recorded (upstream has both failure modes: #523 misses, #1459 false positives); thresholds set at first run — the numbers themselves are the deliverable |
 | 4 | **Incremental indexing**: does a push trigger index update without full re-index? | Push a representative commit; measure latency and changed-work scope | Incremental latency in seconds-to-minutes; no full re-index |
 | 5 | **Scale smoke**: size/time/memory for 20 representative repos | Measure during item 2 | Numbers recorded as S1 baseline; no runaway WAL/disk growth |
 | 6 | **Query latency**: P50/P95 on a fixed 20-question probe set | Script the probes against the MCP tools | Latencies recorded; flag anything P95 > 5s for investigation |
-| 7 | **Desktop sidecar feasibility**: can the baize server be packaged as a Node SEA sidecar that still spawns child processes (git, CBM)? | Build a SEA binary; spawn git and CBM from it | Works on macOS unsigned/dev-signed; Windows/Linux assessed |
+| 7 | **Desktop sidecar feasibility**: package the baize server as a plain Node binary + JS bundle Tauri sidecar (per §6.5; SEA rejected as primary because `child_process.fork` breaks by design) | Build the sidecar; spawn git, OMP, and CBM from it; verify process-tree cleanup on app quit | Works signed (hardened runtime + JIT entitlements) on macOS; Windows/Linux assessed |
+| 8 | **WAL/daemon soak**: CBM has open WAL-growth and daemon-stability issues (#1083: 115 GB WAL in 4.5 h under concurrent index workers; #581: slow memory leak; #1955/#2107: daemon client timeouts/wedges) | Index 20 repos while running query load; watch WAL size, daemon restarts, and memory over 24 h | WAL bounded by configured caps and checkpointing; no daemon wedge; memory stable |
 
 ## 18. Key Technical Risks
 
-### CBM distribution/runtime (new)
+### CBM distribution/runtime
 
-CBM may not be spawnable from Node without extra runtimes. _Mitigation_: Phase 0 item 1; fallbacks include pinned-binary download or `uvx`, at the cost of the "clean machine" promise.
+Confirmed spawnable as an MCP stdio static binary (npm postinstall download). Residual risk: postinstall needs network access to GitHub Releases, and OMP's own runtime requirement (Bun vs prebuilt binary) is unconfirmed. _Mitigation_: Phase 0 item 1; pre-bundle or mirror binaries for locked-down environments.
 
-### CBM capability gap (new)
+### CBM capability gap
 
-Cross-repo relationships, architecture queries, or impact analysis may be partial or absent (§8.2). _Mitigation_: Phase 0 item 3 quantifies the gap; BaiZe Skills and search-augmented investigation compensate where static analysis falls short; worst case re-scopes §8.2/§8.4 commitments.
+Cross-repo relationship quality is unproven and upstream issues show both misses and false positives (§8.2). _Mitigation_: Phase 0 item 3 quantifies the gap per relationship type; BaiZe Skills and search-augmented investigation compensate where static analysis falls short; worst case re-scopes §8.2/§8.4 commitments.
+
+### CBM project maturity (new)
+
+CBM is ~6.5 months old with 500+ open issues, and a community fork exists because of slow upstream merges. _Mitigation_: pin an exact CBM version in the npm package; budget for tracking upstream; verify every upgrade against the Phase 0 checklist before rolling it out.
 
 ### CBM serverization maturity
 
-CBM is primarily a local MCP/code-memory engine, not an enterprise multi-tenant cluster. _Mitigation_ (Enterprise form): isolate behind the gateway, hide topology from agents, shard if necessary.
+CBM is primarily a local MCP/code-memory engine (per-account daemon, no network transport — upstream #709), not an enterprise multi-tenant cluster. _Mitigation_ (Enterprise form): isolate behind the gateway, hide topology from agents, shard if necessary.
 
 ### SQLite concurrency / WAL growth
 
-Large indexing workloads with concurrent readers/writers may create database pressure. _Mitigation_: bound indexing concurrency, monitor WAL/checkpoint behavior, benchmark at each scale milestone.
+Concrete upstream evidence: #1083 (WAL grew to 115 GB in 4.5 h under concurrent index workers), #1174 (stuck/oversized WAL on Windows), #1206 (multi-instance DB quarantine contention). _Mitigation_: bound indexing concurrency, own the daemon lifecycle from the baize CLI, apply CBM's WAL size bounds, run the Phase 0 soak (§17 item 8), benchmark at each scale milestone.
 
 ### Cross-repository graph quality
 
@@ -520,13 +534,13 @@ Graph relationships can indirectly expose restricted repository information. _Mi
 
 ## 19. Open Questions
 
-Resolved in v0.2: deployment form (§3); repo onboarding (Fleet in MVP, §7); branch policy (default branch, per-repo override, §7.1); ACL in Personal form (credential delegation, §3.1); UI source (Panda-derived, §6.3).
+Resolved in v0.2: deployment form (§3); repo onboarding (Fleet in MVP, §7); branch policy (default branch, per-repo override, §7.1); ACL in Personal form (credential delegation, §3.1); UI source (Panda-derived, §6.3). Resolved in v0.2.1: OMP identity (Oh My Pi, §5); desktop sidecar packaging path (§6.5).
 
 Remaining, each annotated with what it blocks:
 
-1. Can a single CBM store reliably support the target estate? — **blocks Phase 3 design**; informed by §17 items 2/5.
+1. Can a single CBM store reliably support the target estate? — **blocks Phase 3 design**; informed by §17 items 2/5/8.
 2. What is the optimal shard size? — Phase 3.
-3. How well does CBM resolve Go/Rust/Java/TypeScript cross-repo relationships? — **Phase 0, §17 item 3**.
+3. How well does CBM resolve Go/Rust/Java/TypeScript cross-repo relationships? — **Phase 0, §17 item 3**. (Single-repo type resolution for these languages is benchmarked "Good" 75–89% upstream; the open part is cross-repo edge quality.)
 4. How should generated/vendor code be excluded? — Phase 1 (needed for honest index-size numbers).
 5. ~~Branch policy~~ — resolved (§7.1).
 6. Is Zoekt required for global retrieval? — Phase 4 decision point.
@@ -534,15 +548,14 @@ Remaining, each annotated with what it blocks:
 8. How should repo ACLs be synchronized from SCM systems? — Phase 3.
 9. Do we need PR/Issue/ADR context in V1, or only source code? — Phase 3 scoping.
 10. Should architecture graph state be persisted separately from CBM? — Phase 3.
-11. What is the canonical name and provenance of "OMP/pi"? — **documentation debt; blocks finalizing §5 and the architecture diagrams**.
-12. Which GitLab PAT scopes are minimally sufficient (`read_api` ± `read_repository`)? — Phase 0, alongside §17 item 1.
+11. Which GitLab PAT scopes are minimally sufficient (`read_api` ± `read_repository`)? — Phase 0, alongside §17 item 1.
 
 ## 20. Current Recommended Direction
 
 Build the **Personal form** first:
 
 ```text
-npx baize  =  BaiZe UI (Panda-derived) + OMP/pi + CBM + GitLab fleet
+npx baize  =  BaiZe UI (Panda-derived) + OMP + CBM + GitLab fleet
 ```
 
 Do **not** build a custom BaiZe code-intelligence backend, and do not build the enterprise layer until Personal-form scale validation proves the gaps.

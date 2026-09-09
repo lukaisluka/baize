@@ -55,7 +55,7 @@ export async function startApp({
   })
   sync.start()
 
-  const server = createBaizeServer({ logger, registry, gitlab, sync, uiDist })
+  const server = createBaizeServer({ logger, registry, gitlab, sync, uiDist, agentWorkspace: join(home, 'agent') })
   const bridge = createAcpBridge({
     server,
     home,

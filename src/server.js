@@ -485,7 +485,7 @@ function readJsonBody(req) {
 // baize index arbitrary local paths, and DNS rebinding can forge the Host.
 // Every surface requires an explicit local Host; writes additionally require
 // a JSON content-type.
-async function handleApi(req, res, path, { registry, gitlab, sync }) {
+async function handleApi(req, res, path, { registry, gitlab, sync, agentWorkspace }) {
   const getLike = req.method === 'GET' || req.method === 'HEAD'
 
   if (getLike && path === '/api/health') {
@@ -493,7 +493,10 @@ async function handleApi(req, res, path, { registry, gitlab, sync }) {
   }
 
   if (getLike && path === '/api/repos') {
-    return sendJson(res, 200, { repos: await registry.list() })
+    // agentWorkspace: the directory whose AGENTS.md guides the chat agent
+    // over the fleet — clients driving a session (the benchmark runner)
+    // should use it as session/new's cwd to get the full baize contract.
+    return sendJson(res, 200, { repos: await registry.list(), ...(agentWorkspace ? { agentWorkspace } : {}) })
   }
 
   if (req.method === 'POST' && path === '/api/repos') {
@@ -578,7 +581,7 @@ async function handleApi(req, res, path, { registry, gitlab, sync }) {
   return sendJson(res, 404, { error: 'not found' })
 }
 
-export function createBaizeServer({ logger, registry, gitlab, sync, uiDist } = {}) {
+export function createBaizeServer({ logger, registry, gitlab, sync, uiDist, agentWorkspace } = {}) {
   const spaAvailable = uiDist ? existsSync(join(uiDist, 'index.html')) : false
 
   return createServer(async (req, res) => {
@@ -596,7 +599,7 @@ export function createBaizeServer({ logger, registry, gitlab, sync, uiDist } = {
 
     try {
       if (path.startsWith('/api/')) {
-        status = await handleApi(req, res, path, { registry, gitlab, sync })
+        status = await handleApi(req, res, path, { registry, gitlab, sync, agentWorkspace })
       } else if (getLike && (path === '/fleet' || path === '/fleet/')) {
         status = send(res, 200, FLEET_HTML, 'text/html; charset=utf-8')
       } else if (getLike && uiDist && spaAvailable) {

@@ -46,3 +46,16 @@ test('an empty fleet still gets a workspace (explicit empty listing)', () => {
   assert.match(md, /No repositories indexed yet/)
   assert.match(md, /codebase-memory/, 'the tool guidance is still there')
 })
+
+test('table cells escape pipes so a hostile repo name cannot break the listing', () => {
+  const agentDir = join(work, 'pipes')
+  const { agentsPath } = prepareAgentWorkspace({
+    agentDir,
+    repos: { 'grp/a|b': { path: '/wt/a|b', lastIndexedRevision: 'deadbeef11' } },
+  })
+  const md = readFileSync(agentsPath, 'utf8')
+  assert.match(md, /grp\/a\\\|b/, 'pipe in the name is escaped')
+  assert.match(md, /\/wt\/a\\\|b/, 'pipe in the path is escaped')
+  const row = md.split('\n').find((line) => line.includes('grp/a'))
+  assert.ok(!row.includes('grp/a|b') && !row.includes('/wt/a|b'), 'no raw pipe survives in cells')
+})

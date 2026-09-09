@@ -26,9 +26,16 @@ export function cbmMcpServer({ binaryPath, cacheDir }) {
   }
 }
 
+/** Markdown table cells escape their own delimiter — a `|` inside a repo
+ * name or path would otherwise break the listing table. */
+const mdCell = (text) => String(text).replaceAll('|', '\\|')
+
 function agentsMarkdown(repos) {
   const rows = Object.entries(repos)
-    .map(([name, entry]) => `| ${name} | ${entry.path} | ${(entry.lastIndexedRevision ?? '').slice(0, 10) || 'not yet'} |`)
+    .map(
+      ([name, entry]) =>
+        `| ${mdCell(name)} | ${mdCell(entry.path)} | ${(entry.lastIndexedRevision ?? '').slice(0, 10) || 'not yet'} |`,
+    )
     .join('\n')
   const listing = rows
     ? `| project (index name) | worktree at indexed revision | indexed @ |\n| --- | --- | --- |\n${rows}`

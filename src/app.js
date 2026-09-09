@@ -66,7 +66,7 @@ export async function startApp({
     prepareWorkspace: () =>
       prepareAgentWorkspace({ agentDir: join(home, 'agent'), repos: config.repos ?? {} }),
     agentMcpServers: () => {
-      const binaryPath = cbm.binaryPathOrNull()
+      const binaryPath = cbm.binaryPathOrNull(logger)
       return binaryPath ? [cbmMcpServer({ binaryPath, cacheDir: dirs.index })] : []
     },
   })

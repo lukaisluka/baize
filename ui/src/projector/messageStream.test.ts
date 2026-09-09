@@ -427,6 +427,36 @@ describe('projection unverified rows (#10 tracer bullet)', () => {
     expect(items.some((item) => item.kind === 'unverified')).toBe(false);
   });
 
+  it('does not mark while the conversation awaits the user (requires_action)', () => {
+    const doc = fold([
+      ...turnWithoutTools,
+      { sessionUpdate: 'status_changed', status: 'requires_action' },
+    ]);
+    const items = projectMessageStream(doc);
+    expect(items.some((item) => item.kind === 'unverified')).toBe(false);
+  });
+
+  it('does not mark an aborted turn (turn_notice) — there is no answer to verify', () => {
+    const doc = fold([
+      ...turnWithoutTools,
+      { sessionUpdate: 'turn_notice', stopReason: 'cancelled' },
+      { sessionUpdate: 'status_changed', status: 'idle' },
+    ]);
+    const items = projectMessageStream(doc);
+    expect(items.some((item) => item.kind === 'unverified')).toBe(false);
+  });
+
+  it('does not mark an answer-less turn — no agent_message means nothing to verify', () => {
+    const doc = fold([
+      // The optimistic-user-message intermediate state: the turn exists, the
+      // answer does not yet.
+      { sessionUpdate: 'user_message', content: [{ type: 'text', text: 'hi' }] },
+      { sessionUpdate: 'status_changed', status: 'idle' },
+    ]);
+    const items = projectMessageStream(doc);
+    expect(items.some((item) => item.kind === 'unverified')).toBe(false);
+  });
+
   it('never marks a turn that used tools (the citations live in its cards)', () => {
     const doc = fold([...turnWithTool, { sessionUpdate: 'status_changed', status: 'idle' }]);
     const items = projectMessageStream(doc);
@@ -441,7 +471,16 @@ describe('projection unverified rows (#10 tracer bullet)', () => {
       { sessionUpdate: 'status_changed', status: 'idle' },
     ]);
     const items = projectMessageStream(doc);
-    const unverified = items.filter((item) => item.kind === 'unverified');
-    expect(unverified).toHaveLength(1);
+    // The unverified row trails ITS turn — after that turn's agent message,
+    // before nothing (it is the last turn), and nowhere near the tool-backed
+    // turn's flow.
+    expect(items.map((item) => (item.kind === 'block' ? item.block.kind : item.kind))).toEqual([
+      'user_message',
+      'tool_call',
+      'agent_message',
+      'user_message',
+      'agent_message',
+      'unverified',
+    ]);
   });
 });

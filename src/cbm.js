@@ -66,11 +66,13 @@ export class CbmSupervisor {
 
   /** The binary path if it can be resolved right now, else null. Callers that
    * only want to wire other processes to the same binary (e.g. the agent
-   * workspace) must not crash when the download failed — they degrade. */
-  binaryPathOrNull() {
+   * workspace) must not crash when the download failed — they degrade, but
+   * never silently: the resolve error carries the remedy, so log it. */
+  binaryPathOrNull(logger) {
     try {
       return this.#binaryPath()
-    } catch {
+    } catch (err) {
+      logger?.warn(`cbm: agent chat runs without codebase-memory tools — ${err.message}`)
       return null
     }
   }

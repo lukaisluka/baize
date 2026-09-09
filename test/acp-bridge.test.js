@@ -276,8 +276,20 @@ test('agentMcpServers are injected into session/new; client-declared servers win
     assert.deepEqual(fresh.result.params.mcpServers, mine(), 'without client servers both are injected')
     assert.equal(fresh.result.params.cwd, '/x', 'other params untouched')
 
+    // load/resume take the same parameter — session restarts must not lose CBM.
+    const loaded = await request(ws, 'session/load', { sessionId: 's-x', cwd: '/x' })
+    assert.deepEqual(loaded.result.params.mcpServers, mine(), 'session/load is injected too')
+    const resumed = await request(ws, 'session/resume', { sessionId: 's-x' })
+    assert.deepEqual(resumed.result.params.mcpServers, mine(), 'session/resume is injected too')
+
     const nonSession = await request(ws, 'session/prompt', { prompt: [] })
     assert.equal(nonSession.result.params.mcpServers, undefined, 'non-session methods pass through untouched')
+
+    // A non-JSON client frame survives the injection parser verbatim: it is
+    // forwarded as-is (the agent drops it), and the connection stays up.
+    ws.send('this is not json')
+    const afterNoise = await request(ws, 'ping', {})
+    assert.deepEqual(afterNoise.result, { pong: true, otelLeaked: [] }, 'non-JSON frame forwarded verbatim, connection healthy')
     ws.close()
   } finally {
     await mcpBridge.stop()

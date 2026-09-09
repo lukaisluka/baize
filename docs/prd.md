@@ -277,18 +277,22 @@ BaiZe aims to identify relationships that cross repository boundaries, including
 
 | Transport | Edge type | Hit | FP | Verdict |
 |---|---|---|---|---|
-| HTTP route — `fetch` relative path, `axios.post` full URL | `CROSS_HTTP_CALLS` | 2/3 | 0 | **go**, with the constraints below |
+| HTTP route — `fetch` relative path, `axios.post` full URL | `CROSS_HTTP_CALLS` | 2/4 | 0 | **go**, with the constraints below |
 | HTTP route — axios instance + baseURL (`ordersApi.post`) | `CROSS_HTTP_CALLS` | 0/1 | 0 | adjust — extractor never emits calls for instance methods |
+| HTTP route — inline arrow handler (measured) | `CROSS_HTTP_CALLS` | 0/1 | 0 | adjust — no `HANDLES` edge for arrow-function handlers, so the route can never be linked |
 | Kafka topic (kafkajs) | `CROSS_ASYNC_CALLS` | 0/2 | 0 | **adjust** — kafkajs is invisible to the extractor on 0.10.8 (no ASYNC_CALLS at all) |
 | EventEmitter channel (node:events) | `CROSS_CHANNEL` | 1/1 | 0 | go |
 | gRPC (proto + @grpc/grpc-js) | `CROSS_GRPC_CALLS` | 0/1 | 0 | **adjust** — no gRPC matching pass exists upstream |
 | GraphQL (@apollo/client) | `CROSS_GRAPHQL_CALLS` | 0/1 | 0 | **adjust** — no GraphQL matching pass exists upstream |
 
-All three traps held (URLs appearing only in strings/comments were not linked; `orders.created.v2` was not conflated with `orders.created`; an orphan consumer was linked to nothing).
+All three traps held, but only the string-URL trap is discriminating: with
+kafkajs invisible to the extractor (zero async edges in the whole fleet),
+the two Kafka traps are held vacuously — they become discriminating the day
+Kafka extraction exists.
 
 Constraints that define what "HTTP works" means (verified against upstream source, `pass_cross_repo.c` / `extract_calls.c`):
 
-- The server-side handler must be a **named function** (`app.get('/orders', listOrders)`). Matching follows the Route node's `HANDLES` edge, and the extractor emits `HANDLES` only for identifier / member-expression / string handler arguments — inline arrow functions never match. Channel listeners (`LISTENS_ON`) have the same requirement. Real code bases using inline handlers will miss more than these fixture numbers show.
+- The server-side handler must be a **named function** (`app.get('/orders', listOrders)`). Matching follows the Route node's `HANDLES` edge, and the extractor emits `HANDLES` only for identifier / member-expression / string handler arguments — inline arrow functions never match (measured: an inline-arrow fixture route misses). Channel listeners (`LISTENS_ON`) have the same requirement. Real code bases using inline handlers will miss more than these fixture numbers show.
 - Client-side extraction is form-sensitive: `fetch` with a relative path and `axios.post` with a full URL are extracted; axios instance methods are not.
 
 **Decision**: cross-repo understanding ships as an engine commitment for **HTTP routes and EventEmitter-style channels only**. Kafka, gRPC, and GraphQL cross-repo discovery are not engine commitments — they are covered by the `cross-repo-investigation` skill family and search-augmented investigation (§9) until upstream closes the gap, and §8.4 inherits the same boundary.
@@ -528,7 +532,7 @@ Each item has a pass criterion; failure triggers a documented fallback decision 
 | 2 | **Multi-repo store**: can one CBM instance hold multiple repositories with repo-scoped queries? | Index 20 repos into one store; run scoped and unscoped queries | Queries correctly scope by repo; no cross-contamination of results |
 | 3 | **Cross-repo relationships**: quantify CBM's `cross-repo-intelligence` mode per relationship type — HTTP routes, gRPC, GraphQL, async topics (**Kafka explicitly; upstream matching is partial**), proto imports | Index 3–5 repos with known cross-repo links; run `index_repository` in `cross-repo-intelligence` mode with `target_projects`; query for each known link | Hit-rate **and false-positive rate** per relationship type recorded (upstream has both failure modes: #523 misses, #1459 false positives); thresholds set at first run — the numbers themselves are the deliverable |
 
-> **Cross-repo relationships — measured (issue #14, 2026-09-09, CBM 0.10.8)**: HTTP 2/3 (miss = axios instance methods; server handler must be a named function), channel 1/1, Kafka/kafkajs 0/2 (extractor emits no ASYNC_CALLS for kafkajs), gRPC 0/1 and GraphQL 0/1 (no matching pass upstream). 0 false positives; 3/3 traps held. Full numbers and go/adjust decisions in §8.2. Harness: `benchmark/crossrepo/measure.mjs` — re-run on every CBM upgrade.
+> **Cross-repo relationships — measured (issue #14, 2026-09-09, CBM 0.10.8)**: HTTP 2/4 (misses: axios instance methods; inline-arrow server handler — the named-handler constraint is now measured, not just source-verified), channel 1/1, Kafka/kafkajs 0/2 (extractor emits no ASYNC_CALLS for kafkajs), gRPC 0/1 and GraphQL 0/1 (no matching pass upstream). 0 false positives; string-URL trap held; the two Kafka traps are held vacuously (nothing async to conflate). Full numbers and go/adjust decisions in §8.2. Harness: `benchmark/crossrepo/measure.mjs` — re-run on every CBM upgrade.
 | 4 | **Incremental indexing**: does a push trigger index update without full re-index? | Push a representative commit; measure latency and changed-work scope | Incremental latency in seconds-to-minutes; no full re-index |
 | 5 | **Scale smoke**: size/time/memory for 20 representative repos | Measure during item 2 | Numbers recorded as S1 baseline; no runaway WAL/disk growth |
 | 6 | **Query latency**: P50/P95 on a fixed 20-question probe set | Script the probes against the MCP tools | Latencies recorded; flag anything P95 > 5s for investigation |

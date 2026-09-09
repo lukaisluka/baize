@@ -57,6 +57,12 @@ export function createHttpServer() {
   const app = express()
   app.get('/orders', listOrders)
   app.post('/payments', chargePayment)
+  // Inline arrow handler: the deliberate miss side of the named-handler
+  // constraint — no HANDLES edge is emitted for arrow functions, so this
+  // route can never be linked cross-repo (extract_calls.c: extract_handler_arg).
+  app.get('/inline-orders', async (req, res) => {
+    res.json([])
+  })
   return app
 }
 `,
@@ -140,6 +146,13 @@ const ordersApi = axios.create({ baseURL: 'http://orders-api:3000' })
 
 export async function loadOrders() {
   const res = await fetch('/orders')
+  return res.json()
+}
+
+// Client for the inline-arrow-handler route: measures the miss side of the
+// named-handler constraint (see orders-api src/http.js).
+export async function loadInlineOrders() {
+  const res = await fetch('/inline-orders')
   return res.json()
 }
 

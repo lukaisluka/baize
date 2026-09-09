@@ -27,27 +27,32 @@ miss, and every reported edge verbatim.
 | HTTP route (fetch, relative path) | `CROSS_HTTP_CALLS` | 1/1 | ✓ |
 | HTTP route (axios full URL) | `CROSS_HTTP_CALLS` | 1/1 | ✓ — `url_path` arrives as the full URL |
 | HTTP route (axios instance + baseURL) | `CROSS_HTTP_CALLS` | 0/1 | extractor never emits HTTP_CALLS for instance methods (`ordersApi.post(...)`) |
+| HTTP route (inline arrow handler) | `CROSS_HTTP_CALLS` | 0/1 | measured miss — no `HANDLES` edge is emitted for arrow-function handlers, so the route can never be linked |
 | Kafka topic (kafkajs) | `CROSS_ASYNC_CALLS` | 0/2 | kafkajs producer/consumer produce **no** ASYNC_CALLS edges at all — extractor gap, not a matcher miss |
 | EventEmitter channel (node:events) | `CROSS_CHANNEL` | 1/1 | ✓ — the async transport that works in JS |
 | gRPC (proto + @grpc/grpc-js) | `CROSS_GRPC_CALLS` | 0/1 | no gRPC phase exists in upstream `pass_cross_repo.c`; the counter field exists but no matcher runs |
 | GraphQL (@apollo/client) | `CROSS_GRAPHQL_CALLS` | 0/1 | same — no GraphQL phase upstream |
 
-Aggregate: 3 of 8 expected links found; **0 false positives** across 3
-reported edges; all 3 traps held (URLs in strings/comments not linked,
-`orders.created.v2` not conflated with `orders.created`, orphan consumer not
-linked to anything).
+Aggregate: 3 of 9 expected links found; **0 false positives** across 3
+reported edges; all 3 traps held — but only the string-URL trap is
+discriminating: with kafkajs invisible to the extractor (0 async edges in
+the whole fleet), the two Kafka traps (`orders.created.v2` near-miss, orphan
+consumer) are held **vacuously** — the matcher never had a chance to
+conflate them. They become discriminating the day the extractor emits Kafka
+edges; the harness already re-tests them on every run.
 
 ## Why the misses happen (root causes, verified against upstream source)
 
-1. **HANDLES requires a named handler.** Cross-repo HTTP matching finds the
-   target repo's Route node and follows its `HANDLES` edge
-   (`pass_cross_repo.c: find_route_handler`). The extractor only emits
-   `HANDLES` when the handler argument is an identifier / member expression /
-   string — an inline arrow function matches none of those kinds
-   (`extract_calls.c: extract_handler_arg`). Same requirement for
-   `LISTENS_ON` (channel listeners). **Fixtures therefore use named handlers
-   (`app.get('/orders', listOrders)`); real code bases using inline handlers
-   will miss far more than this table shows.**
+1. **HANDLES requires a named handler — measured, not just inferred.** The
+   fixture fleet includes one inline-arrow route (`/inline-orders`) and it
+   misses, confirming on 0.10.8 what the source says: cross-repo HTTP
+   matching finds the target repo's Route node and follows its `HANDLES`
+   edge (`pass_cross_repo.c: find_route_handler`), and the extractor only
+   emits `HANDLES` when the handler argument is an identifier / member
+   expression / string — an inline arrow function matches none of those
+   kinds (`extract_calls.c: extract_handler_arg`). Same requirement for
+   `LISTENS_ON` (channel listeners). **Real code bases using inline handlers
+   will miss more than the named-handler rows of the table show.**
 2. **Client-side extraction is form-sensitive.** `fetch` with a relative path
    and `axios.post` with a full URL are extracted; axios instance methods
    (`ordersApi.post`) are not.
@@ -64,19 +69,30 @@ linked to anything).
 
 - [`fixtures.mjs`](./fixtures.mjs) — writes the 5-repo fleet (3 shop repos
   with real links, 2 noise repos that are traps) and git-inits each
-- [`ground-truth.json`](./ground-truth.json) — the 11 relations (8 links,
+- [`ground-truth.json`](./ground-truth.json) — the 12 relations (9 links,
   3 no-link traps) with `key` = route path / topic name that edge detail
   must equal; notes per relation record upstream constraints
-- [`measure.mjs`](./measure.mjs`) — the runner; exit 0 always (the JSON is
-  the deliverable — numbers, not a pass/fail gate)
+- [`measure.mjs`](./measure.mjs`) — the runner; the JSON report is the
+  deliverable, there is no pass/fail gate — but degenerate collection
+  (unattributable rows, rows lost against the counters the cross-repo runs
+  report, query truncation) aborts loudly instead of printing wrong
+  numbers
 
 ## Matching semantics
 
 An edge satisfies a link when the **unordered repo pair** matches, the **type
-family** matches, and the edge detail (`url_path` / `channel_name`) equals the
-relation's `key` (HTTP allows path-suffix match since axios full-URL form
-embeds the host). The key check exists because two different transports can
+family** matches, and the edge detail (`url_path` / `channel_name`) equals
+the relation's `key` (HTTP keys are route paths; when the edge arrives as a
+full URL the **parsed pathname** must equal the key exactly — no suffix
+matching, so `/orders` cannot match `/api/orders` or a same-suffix path on
+another host). The key check exists because two different transports can
 run between the same repo pair — kafka `orders.created` and EventEmitter
 `order.created` on the same pair — and without it a channel edge would
 satisfy a kafka relation. Traps are the inverse: a trap is *held* when no edge
 matches its pair + type + key.
+
+Duplicate copies of an edge are deduplicated by identity (type + repo pair +
+detail + endpoint functions, all direction-invariant) — the forward copy in
+the caller's graph and the reverse copy in the handler's graph collapse to
+one, while two distinct edges of the same type between the same pair (e.g.
+two routes) stay separate.

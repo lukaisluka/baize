@@ -49,12 +49,23 @@ function edgeMatchesRelation(edge, relation) {
   if (!pairOk) return false
   if (!typesFor(relation.type).includes(edge.type)) return false
   if (!relation.key) return true
-  const detail = edge.detail?.url_path ?? edge.detail?.channel_name ?? ''
-  // HTTP url_path may arrive as a full URL (axios full-URL form) — the route
-  // identity is the path suffix.
-  if (edge.type === 'CROSS_HTTP_CALLS') return detail === relation.key || detail.endsWith(relation.key)
+  const detail = edgeDetail(edge)
+  // HTTP url_path may arrive as a full URL (axios full-URL form). Parse it
+  // and compare the pathname exactly — a bare endsWith would let '/orders'
+  // match '/api/orders' or a same-suffix path on a different host.
+  if (edge.type === 'CROSS_HTTP_CALLS') {
+    if (detail === relation.key) return true
+    try {
+      return new URL(detail).pathname === relation.key
+    } catch {
+      return false
+    }
+  }
   return detail === relation.key
 }
+
+/** The identifying detail of an edge: its route path or channel name. */
+const edgeDetail = (edge) => edge.detail?.url_path ?? edge.detail?.channel_name ?? ''
 
 function matchRelation(relation, edges) {
   if (relation.expect === 'link') return edges.some((e) => edgeMatchesRelation(e, relation))
@@ -71,12 +82,21 @@ async function main() {
     warn: (m) => console.error(`WARN ${m}`),
     error: (m) => console.error(`ERR ${m}`),
   }
-  const repos = writeFixtures(join(root, 'fleet'))
   const cbm = new CbmSupervisor({ cacheDir: cache, logger })
   const call = (tool, args) => cbm.call(tool, args, { timeoutMs: 600000 })
 
   const report = { startedAt: new Date().toISOString(), repos: [], edges: [], typeSummary: {} }
+  // Guard rails against silently degenerate reports (the worst failure mode
+  // of this harness — confident wrong numbers): every row must be
+  // attributable, the collected rows must cover what the cross-repo runs
+  // declared, and nothing may hide behind the query LIMIT.
+  let rawRows = 0
+  let declaredEdges = 0
+  let unattributedRows = 0
   try {
+    // Inside the try so a failure here (git missing, disk full) still
+    // cleans up the temp dir.
+    const repos = writeFixtures(join(root, 'fleet'))
     for (const { project, dir } of repos) {
       const r = await call('index_repository', { repo_path: dir, name: project })
       console.error(`indexed ${project}: ${r.nodes} nodes, ${r.edges} edges`)
@@ -84,6 +104,7 @@ async function main() {
     }
     for (const { project, dir } of repos) {
       const cr = await call('index_repository', { repo_path: dir, name: project, mode: 'cross-repo-intelligence', target_projects: ['*'] })
+      declaredEdges += cr.total_cross_edges
       console.error(`cross-repo from ${project}: total=${cr.total_cross_edges} http=${cr.cross_http_calls} async=${cr.cross_async_calls} channel=${cr.cross_channel} grpc=${cr.cross_grpc_calls} graphql=${cr.cross_graphql_calls} trpc=${cr.cross_trpc_calls}`)
     }
     // Cross-repo edges are written into both endpoints' graphs (forward in
@@ -100,10 +121,20 @@ async function main() {
         format: 'json',
         query: `MATCH (a)-[r:${CROSS_TYPES.join('|')}]->(b) RETURN type(r) AS rel, a.name AS a, b.name AS b, properties(r) AS props LIMIT 500`,
       })
-      for (const [rel, fromName, toName, propsRaw] of q.rows ?? []) {
+      if (!Array.isArray(q.rows)) {
+        throw new Error(`query_graph on ${project} returned no rows array (got ${typeof q.rows}) — response shape changed?`)
+      }
+      if (typeof q.total === 'number' && q.total > q.rows.length) {
+        throw new Error(`query_graph on ${project} truncated: ${q.total} matches, ${q.rows.length} returned (LIMIT 500)`)
+      }
+      for (const [rel, fromName, toName, propsRaw] of q.rows) {
+        rawRows += 1
         const props = typeof propsRaw === 'string' ? JSON.parse(propsRaw) : (propsRaw ?? {})
         const other = props.target_project ?? null
-        if (!other || other === project) continue
+        if (!other || other === project) {
+          unattributedRows += 1
+          continue
+        }
         const edge = {
           type: rel,
           from: project,
@@ -113,16 +144,36 @@ async function main() {
           toFile: props.target_file ?? null,
           detail: props,
         }
-        const key = `${edge.type}|${[edge.from, edge.to].sort().join('~')}`
+        // Dedup merges the forward copy (caller's graph) with the reverse
+        // copy (handler's graph) — the key must carry the edge's identity
+        // (detail + endpoint functions, both direction-invariant), or two
+        // DIFFERENT edges of the same type between the same repo pair would
+        // collapse into one and silently skew hit/FP numbers (e.g. one
+        // route per pair).
+        const key = [edge.type, [edge.from, edge.to].sort().join('~'), edgeDetail(edge), [edge.fromFn, edge.toFn].sort().join('~')].join('|')
         if (seen.has(key)) continue
         seen.add(key)
         report.edges.push(edge)
       }
     }
+    if (unattributedRows > 0) {
+      throw new Error(`${unattributedRows} CROSS_* row(s) carried no usable target_project — attribution is broken, refusing to report`)
+    }
+    // Every edge the cross-repo runs declared must appear in some project
+    // graph; an edge is written into at most two graphs (one per endpoint).
+    if (rawRows < declaredEdges) {
+      throw new Error(`cross-repo runs declared ${declaredEdges} edge(s) but graph queries collected ${rawRows} row(s) — collection is dropping edges`)
+    }
+    if (rawRows > declaredEdges * 2) {
+      throw new Error(`graph queries collected ${rawRows} row(s) but only ${declaredEdges} edge(s) were declared (max 2 rows/edge) — stale or duplicated edges`)
+    }
   } finally {
-    await cbm.stop()
-    if (!keep) rmSync(root, { recursive: true, force: true })
-    else console.error(`kept: ${root}`)
+    try {
+      await cbm.stop()
+    } finally {
+      if (!keep) rmSync(root, { recursive: true, force: true })
+      else console.error(`kept: ${root}`)
+    }
   }
 
   // Diff against ground truth.

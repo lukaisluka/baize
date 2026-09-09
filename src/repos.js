@@ -170,14 +170,17 @@ export function createRepoRegistry({
   // same name wins and the mirror takes a suffix. Called by the sync engine
   // whenever a mirror lands on a revision its index has not seen.
   function ensureFleetRepo(rawName, path, revision) {
-    // Reuse only an entry this project already owns (mirror entry at the
-    // same deterministic worktree path). A suffixed fleet entry can collide
-    // with a real GitLab project of that exact name — re-pointing it would
-    // index one project's tree under another's CBM identity, so a path
-    // mismatch registers fresh under the next free suffix instead.
-    let name = rawName
+    // Ownership lookup is keyed by the worktree PATH, not the name: it is
+    // per-project deterministic, so a suffixed entry is found again on
+    // every later visit (every restart re-fires onRevision — a name-keyed
+    // lookup would mint alpha-3, alpha-4, … and a full re-index each time).
+    const mine = Object.entries(config.repos).find(([, e]) => e.mirror === true && e.path === path)
+    let name = mine ? mine[0] : rawName
     let entry = config.repos[name]
-    if (entry && (entry.mirror !== true || entry.path !== path)) {
+    if (!mine && entry && (entry.mirror !== true || entry.path !== path)) {
+      // The name belongs to someone else (manual repo, or another fleet
+      // project that arrived via suffixing) — never re-point it; take the
+      // next free suffix instead.
       name = uniqueName(rawName)
       entry = config.repos[name]
     }

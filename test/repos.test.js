@@ -387,8 +387,8 @@ test('a stale lastIndexedRevision token yields to a missing CBM index and rebuil
       repo_path: join(home, 'm.git'),
       name: 'grp/ghost',
     })
-    // On success the token is re-recorded — from CBM's own result this time,
-    // not from the stale config value.
+    // On success the token is re-recorded — carried by the rebuild kick and
+    // written back through the ordinary success path.
     await waitFor(async () => (await registry.list()).find((r) => r.name === 'grp/ghost')?.status === 'ready')
     assert.equal(config.repos['grp/ghost'].lastIndexedRevision, 'a'.repeat(40))
     registry.stop()
@@ -412,6 +412,28 @@ test('fleet mirror: a suffixed entry is never re-pointed to a different project'
     assert.equal(config.repos['alpha-2'].path, join(home, 'wt-alpha'), 'first project keeps its entry')
     assert.equal(config.repos['alpha-2-2'].path, join(home, 'wt-alpha-2'), 'newcomer suffixed, not re-pointing')
     assert.equal(config.repos['alpha-2-2'].mirror, true)
+    registry.stop()
+  } finally {
+    cleanupHome(home)
+  }
+})
+
+test('fleet mirror: revisits resolve to the same suffixed entry (no restart churn)', async () => {
+  const home = tempHome()
+  try {
+    const { registry, config, calls } = makeRegistry(home)
+    registry.add(gitFixture(join(home, 'alpha')))
+    registry.ensureFleetRepo('alpha', join(home, 'wt-alpha'), 'a'.repeat(40)) // → 'alpha-2'
+    await waitFor(() => config.repos['alpha-2']?.lastIndexedRevision === 'a'.repeat(40))
+    // Every restart re-fires onRevision with the current revision; later
+    // syncs fire on pushes. All must land on the SAME entry — a name-keyed
+    // lookup would mint alpha-3, alpha-4, … and a full re-index each visit.
+    registry.ensureFleetRepo('alpha', join(home, 'wt-alpha'), 'a'.repeat(40)) // restart, same revision
+    registry.ensureFleetRepo('alpha', join(home, 'wt-alpha'), 'b'.repeat(40)) // push
+    await waitFor(() => config.repos['alpha-2']?.lastIndexedRevision === 'b'.repeat(40))
+    assert.deepEqual(Object.keys(config.repos).sort(), ['alpha', 'alpha-2'], 'no orphan entries minted')
+    const indexed = calls.filter((c) => c.tool === 'index_repository' && c.args.name === 'alpha-2')
+    assert.equal(indexed.length, 2, 'one index per revision — the same-revision re-fire was a no-op')
     registry.stop()
   } finally {
     cleanupHome(home)

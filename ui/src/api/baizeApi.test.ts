@@ -51,6 +51,14 @@ describe('baizeApi wire contract', () => {
     await expect(verifyBaizeToken()).rejects.toThrow('HTTP 500');
   });
 
+  it('a non-JSON error body (proxy page) degrades to the status, not a SyntaxError', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('<html>502 Bad Gateway</html>', { status: 502 })),
+    );
+    await expect(verifyBaizeToken()).rejects.toThrow('HTTP 502');
+  });
+
   it('discovers with the input verbatim (group or explicit repos)', async () => {
     const calls = stubFetch(200, { repos: [] });
     await discoverBaize({ group: 'grp/sub' });

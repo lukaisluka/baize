@@ -4,9 +4,16 @@ import {
   formatBytes,
   initialSyncSnapshot,
   parseRepoList,
+  selectionFromDiscovery,
+  setupPhase,
   wizardNeedsSetup,
 } from './SetupWizard';
-import type { BaizeGitlabSettings, BaizeMirrorState, BaizeRepoStatus } from '../api/baizeApi';
+import type {
+  BaizeDiscoveredRepo,
+  BaizeGitlabSettings,
+  BaizeMirrorState,
+  BaizeRepoStatus,
+} from '../api/baizeApi';
 
 describe('wizardNeedsSetup (#16: empty ~/.baize lands in the wizard)', () => {
   const settings = (patch: Partial<BaizeGitlabSettings>): BaizeGitlabSettings => ({
@@ -28,6 +35,47 @@ describe('wizardNeedsSetup (#16: empty ~/.baize lands in the wizard)', () => {
 
   it('never shows the wizard while settings are still loading', () => {
     expect(wizardNeedsSetup(null)).toBe(false);
+  });
+});
+
+describe('setupPhase (#26 review: skip must actually dismiss)', () => {
+  const unconfigured: BaizeGitlabSettings = { baseUrl: null, hasToken: false, selection: null };
+  const configured: BaizeGitlabSettings = {
+    baseUrl: 'https://x',
+    hasToken: true,
+    selection: { type: 'group', path: 'g' },
+  };
+
+  it('unconfigured and not dismissed needs the wizard', () => {
+    expect(setupPhase(unconfigured, false)).toBe('needed');
+  });
+
+  it('a dismiss hides the wizard even while unconfigured (skip = not now)', () => {
+    expect(setupPhase(unconfigured, true)).toBe('done');
+  });
+
+  it('loading never flashes the wizard', () => {
+    expect(setupPhase(null, false)).toBe('loading');
+  });
+
+  it('configured is done with or without a dismiss', () => {
+    expect(setupPhase(configured, false)).toBe('done');
+    expect(setupPhase(configured, true)).toBe('done');
+  });
+});
+
+describe('selectionFromDiscovery (#26 review: confirm saves the snapshot, not the live inputs)', () => {
+  const repos: BaizeDiscoveredRepo[] = [
+    { name: 'g/a', defaultBranch: 'main', webUrl: '', sshUrl: '', httpUrl: '', archived: false, sizeBytes: 1 },
+    { name: 'g/b', defaultBranch: 'main', webUrl: '', sshUrl: '', httpUrl: '', archived: false, sizeBytes: 2 },
+  ];
+
+  it('group discovery snapshots the requested path', () => {
+    expect(selectionFromDiscovery('group', ' grpA ', repos)).toEqual({ type: 'group', path: 'grpA' });
+  });
+
+  it('repos discovery snapshots the discovered names', () => {
+    expect(selectionFromDiscovery('repos', '', repos)).toEqual({ type: 'repos', repos: ['g/a', 'g/b'] });
   });
 });
 
@@ -102,6 +150,13 @@ describe('initialSyncSnapshot (live first-sync progress)', () => {
   it('settles when nothing is cloning/fetching/indexing', () => {
     const snap = initialSyncSnapshot({ 'grp/a': mirror('idle') }, [index('ready')]);
     expect(snap.settled).toBe(true);
+  });
+
+  it('never settles on the index side alone — the fleet must have registered mirrors (#26 review)', () => {
+    // A repo indexed outside the fleet (e.g. via /fleet local add) must not
+    // read as "first sync complete" before fleet discovery registered any
+    // mirror state.
+    expect(initialSyncSnapshot({}, [index('ready')]).settled).toBe(false);
   });
 
   it('error and needs-auth are final — they settle, shown as failures', () => {

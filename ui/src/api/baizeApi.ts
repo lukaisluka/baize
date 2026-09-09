@@ -58,7 +58,16 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     headers: init?.body ? { 'content-type': 'application/json', ...(init?.headers ?? {}) } : init?.headers,
   });
   const text = await response.text();
-  const body = text ? (JSON.parse(text) as unknown) : null;
+  // A non-JSON body (proxy error page) must degrade to "HTTP n", not surface
+  // a JSON.parse SyntaxError to the user.
+  let body: unknown = null;
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = null;
+    }
+  }
   if (!response.ok) {
     const message = (body as { error?: string } | null)?.error ?? `HTTP ${response.status}`;
     throw new Error(message);

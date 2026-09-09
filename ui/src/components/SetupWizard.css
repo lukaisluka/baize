@@ -162,6 +162,12 @@
   justify-content: flex-end;
 }
 
+/* Errors and back-navigation sit at the reading start, away from the
+ * forward actions. */
+.setup-actions--start {
+  justify-content: flex-start;
+}
+
 .setup-btn {
   padding: 8px 14px;
   border: 1px solid var(--color-border);

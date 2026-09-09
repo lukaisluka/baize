@@ -77,9 +77,11 @@ export type SyncRepoRow = {
 };
 
 /** Joins mirror states with index statuses by repo name and decides whether
- * the initial sync has settled: something is known, nothing is cloning/
- * fetching, nothing is indexing. Error/needs-auth states still count as
- * settled — they are final for this round and shown as such. */
+ * the initial sync has settled. The mirror side must be non-empty — a lone
+ * indexed local repo (registered outside the fleet) must not read as "sync
+ * complete" before the fleet's discovery has registered any mirror. Error
+ * and needs-auth states still count as settled — they are final for this
+ * round and shown as such. */
 export function initialSyncSnapshot(
   states: Record<string, BaizeMirrorState>,
   repos: BaizeRepoStatus[],
@@ -92,25 +94,46 @@ export function initialSyncSnapshot(
   }));
   const mirrorBusy = Object.values(states).some((s) => s.status === 'cloning' || s.status === 'fetching');
   const indexBusy = repos.some((r) => r.status === 'indexing');
-  return { rows, settled: names.size > 0 && !mirrorBusy && !indexBusy };
+  return { rows, settled: Object.keys(states).length > 0 && !mirrorBusy && !indexBusy };
 }
 
-/** Loads the settings once and re-loads on refresh(); drives whether the
- * wizard replaces the main column. A failed probe counts as unconfigured —
- * the wizard's own actions will surface the real error if /api is down. */
+/** The wizard-visibility decision, pure for tests: loading never flashes the
+ * wizard; a dismiss (skip) hides it until the settings say configured (a
+ * reload re-evaluates from scratch — skip means "not now", not "never"). */
+export function setupPhase(
+  settings: BaizeGitlabSettings | null,
+  dismissed: boolean,
+): 'loading' | 'needed' | 'done' {
+  if (settings === null) return 'loading';
+  if (dismissed) return 'done';
+  return wizardNeedsSetup(settings) ? 'needed' : 'done';
+}
+
+/** Loads the settings once and re-loads on refresh(); dismiss() is what the
+ * skip link and the finish button call — it hides the wizard for this mount
+ * and refreshes, so finishing (settings now complete) stays finished and
+ * skipping (settings still incomplete) stays out of the way until reload.
+ * A failed probe keeps the previous settings when there are any — a mid-
+ * session network blip must not resurrect the wizard over live chat. */
 export function useBaizeSetup(): {
   phase: 'loading' | 'needed' | 'done';
   settings: BaizeGitlabSettings | null;
   refresh: () => void;
+  dismiss: () => void;
 } {
   const [settings, setSettings] = useState<BaizeGitlabSettings | null>(null);
+  const [dismissed, setDismissed] = useState(false);
   const refresh = useCallback(() => {
     getBaizeSettings()
       .then(setSettings)
-      .catch(() => setSettings({ baseUrl: null, hasToken: false, selection: null }));
+      .catch(() => setSettings((prev) => prev ?? { baseUrl: null, hasToken: false, selection: null }));
   }, []);
   useEffect(refresh, [refresh]);
-  return { phase: settings === null ? 'loading' : wizardNeedsSetup(settings) ? 'needed' : 'done', settings, refresh };
+  const dismiss = useCallback(() => {
+    setDismissed(true);
+    refresh();
+  }, [refresh]);
+  return { phase: setupPhase(settings, dismissed), settings, refresh, dismiss };
 }
 
 type Step = 'connect' | 'select' | 'sync';
@@ -150,6 +173,13 @@ export default function SetupWizard({ settings, onFinished }: {
         )}
         {step === 'select' && baseUrl && <SelectStep baseUrl={baseUrl} onSelected={() => setStep('sync')} />}
         {step === 'sync' && <SyncStep onFinished={onFinished} />}
+        {step !== 'connect' && (
+          <div className="setup-actions setup-actions--start">
+            <button type="button" className="setup-btn" onClick={() => setStep(step === 'sync' ? 'select' : 'connect')}>
+              {t('setup.back')}
+            </button>
+          </div>
+        )}
         <footer className="setup-footer">
           <button type="button" className="setup-link" onClick={onFinished}>
             {t('setup.skip')}
@@ -188,6 +218,14 @@ function ConnectStep({ initialBaseUrl, hasStoredToken, onConnected }: {
     }
   };
 
+  // Any edit invalidates the previous verification — Continue must never
+  // carry an identity verified against a different URL (#26 review).
+  const editUrl = (value: string) => {
+    setBaseUrl(value);
+    setUsername(null);
+    setError(null);
+  };
+
   return (
     <section className="setup-card">
       <h2 className="setup-card-title">{t('setup.step.connect')}</h2>
@@ -196,7 +234,7 @@ function ConnectStep({ initialBaseUrl, hasStoredToken, onConnected }: {
         <input
           className="setup-input"
           value={baseUrl}
-          onChange={(e) => setBaseUrl(e.target.value)}
+          onChange={(e) => editUrl(e.target.value)}
           placeholder="https://gitlab.example.com"
           spellCheck={false}
           autoComplete="url"
@@ -231,29 +269,53 @@ function ConnectStep({ initialBaseUrl, hasStoredToken, onConnected }: {
   );
 }
 
+/** The selection a discovery result stands for, snapshotted at discover
+ * time. Confirm saves THIS — never the live inputs — so a later edit (typo
+ * fix, mode flip) can never make the wizard save something the visible
+ * listing does not show. */
+export function selectionFromDiscovery(
+  mode: 'group' | 'repos',
+  groupPath: string,
+  repos: BaizeDiscoveredRepo[],
+): BaizeSelection {
+  return mode === 'group'
+    ? { type: 'group', path: groupPath.trim() }
+    : { type: 'repos', repos: repos.map((r) => r.name) };
+}
+
 function SelectStep({ baseUrl, onSelected }: { baseUrl: string; onSelected: () => void }) {
   const { t } = useI18n();
   const [mode, setMode] = useState<'group' | 'repos'>('group');
   const [groupPath, setGroupPath] = useState('');
   const [repoText, setRepoText] = useState('');
   const [discovering, setDiscovering] = useState(false);
-  const [result, setResult] = useState<{ repos: BaizeDiscoveredRepo[]; missing?: string[] } | null>(null);
+  const [result, setResult] = useState<{
+    repos: BaizeDiscoveredRepo[];
+    missing?: string[];
+    selection: BaizeSelection;
+  } | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const repoList = parseRepoList(repoText);
   const discover = async () => {
+    // Snapshot what the request was made under; the selection below is built
+    // from THIS, not the live inputs. The mode buttons are disabled while
+    // discovering, so the mode cannot flip under an in-flight request.
+    const requestMode = mode;
+    const requestGroup = groupPath.trim();
+    const requestRepos = repoList;
     setDiscovering(true);
     setError(null);
     setResult(null);
     try {
-      const found = mode === 'group'
-        ? await discoverBaize({ group: groupPath.trim() })
-        : await discoverBaize({ repos: repoList });
+      const found = requestMode === 'group'
+        ? await discoverBaize({ group: requestGroup })
+        : await discoverBaize({ repos: requestRepos });
       if (found.repos.length === 0) {
         setError(t('setup.select.empty'));
       } else {
-        setResult(found);
+        setResult({ ...found, selection: selectionFromDiscovery(requestMode, requestGroup, found.repos) });
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -267,10 +329,7 @@ function SelectStep({ baseUrl, onSelected }: { baseUrl: string; onSelected: () =
     setSaving(true);
     setError(null);
     try {
-      const selection: BaizeSelection = mode === 'group'
-        ? { type: 'group', path: groupPath.trim() }
-        : { type: 'repos', repos: result.repos.map((r) => r.name) };
-      await saveBaizeSettings({ baseUrl, selection });
+      await saveBaizeSettings({ baseUrl, selection: result.selection });
       onSelected();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -292,6 +351,7 @@ function SelectStep({ baseUrl, onSelected }: { baseUrl: string; onSelected: () =
             type="button"
             role="radio"
             aria-checked={mode === m}
+            disabled={discovering}
             className={`setup-mode-item ${mode === m ? 'setup-mode-item--active' : ''}`}
             onClick={() => { setMode(m); setResult(null); setError(null) }}
           >
@@ -377,24 +437,38 @@ function SelectStep({ baseUrl, onSelected }: { baseUrl: string; onSelected: () =
 function SyncStep({ onFinished }: { onFinished: () => void }) {
   const { t } = useI18n();
   const [snapshot, setSnapshot] = useState<{ rows: SyncRepoRow[]; settled: boolean } | null>(null);
-  const [syncError, setSyncError] = useState<string | null>(null);
+  // Two error channels that must not erase each other: the sync START can
+  // fail (GitLab unreachable) while polling keeps succeeding — clearing the
+  // start error on a green poll would hide why nothing ever happens (#26
+  // review). Only an explicit retry clears it.
+  const [startError, setStartError] = useState<string | null>(null);
+  const [pollError, setPollError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
   const alive = useRef(true);
 
   useEffect(() => {
     alive.current = true;
     // Fire without awaiting: a full first sync resolves only after every
     // clone finished — progress comes from the poll below.
-    triggerBaizeSyncAll().catch((err) => {
-      if (alive.current) setSyncError(err instanceof Error ? err.message : String(err));
-    });
+    const start = async () => {
+      try {
+        await triggerBaizeSyncAll();
+        if (alive.current) setStartError(null);
+      } catch (err) {
+        if (alive.current) setStartError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (alive.current) setRetrying(false);
+      }
+    };
+    void start();
     const tick = async () => {
       try {
         const [sync, repos] = await Promise.all([getBaizeSync(), getBaizeRepos()]);
         if (!alive.current) return;
         setSnapshot(initialSyncSnapshot(sync.states, repos.repos));
-        setSyncError(null);
+        setPollError(null);
       } catch (err) {
-        if (alive.current) setSyncError(err instanceof Error ? err.message : String(err));
+        if (alive.current) setPollError(err instanceof Error ? err.message : String(err));
       }
     };
     void tick();
@@ -405,12 +479,30 @@ function SyncStep({ onFinished }: { onFinished: () => void }) {
     };
   }, []);
 
+  const retry = () => {
+    setRetrying(true);
+    triggerBaizeSyncAll()
+      .then(() => { if (alive.current) setStartError(null) })
+      .catch((err) => { if (alive.current) setStartError(err instanceof Error ? err.message : String(err)) })
+      .finally(() => { if (alive.current) setRetrying(false) });
+  };
+
   return (
     <section className="setup-card">
       <h2 className="setup-card-title">
         {snapshot?.settled ? t('setup.sync.done') : t('setup.sync.title')}
       </h2>
-      {syncError && <p className="setup-error" role="alert">{t('setup.sync.error', { error: syncError })}</p>}
+      {startError && (
+        <div role="alert">
+          <p className="setup-error">{t('setup.sync.error', { error: startError })}</p>
+          <div className="setup-actions setup-actions--start">
+            <button type="button" className="setup-btn" disabled={retrying} onClick={retry}>
+              {retrying ? t('setup.sync.retrying') : t('setup.sync.retry')}
+            </button>
+          </div>
+        </div>
+      )}
+      {pollError && <p className="setup-error" role="alert">{t('setup.sync.pollError', { error: pollError })}</p>}
       {snapshot && snapshot.rows.length > 0 && (
         <ul className="setup-list">
           {snapshot.rows.map((row) => (
@@ -428,7 +520,7 @@ function SyncStep({ onFinished }: { onFinished: () => void }) {
           ))}
         </ul>
       )}
-      {snapshot && snapshot.rows.length === 0 && !syncError && (
+      {snapshot && snapshot.rows.length === 0 && !startError && (
         <p className="setup-field-hint">{t('setup.sync.waiting')}</p>
       )}
       {snapshot?.settled && snapshot.rows.some((r) => r.mirror?.status === 'error' || r.index?.status === 'error') && (

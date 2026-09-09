@@ -736,6 +736,10 @@ export const messages = {
   'setup.sync.title': { en: 'First sync in progress…', zh: '首次同步进行中…' },
   'setup.sync.done': { en: 'First sync complete', zh: '首次同步完成' },
   'setup.sync.error': { en: 'Sync error: {error}', zh: '同步错误:{error}' },
+  'setup.sync.retry': { en: 'Retry sync', zh: '重试同步' },
+  'setup.sync.retrying': { en: 'Retrying…', zh: '正在重试…' },
+  'setup.sync.pollError': { en: 'Status poll failed: {error}', zh: '状态轮询失败:{error}' },
+  'setup.back': { en: 'Back', zh: '上一步' },
   'setup.sync.waiting': { en: 'Waiting for the fleet to register…', zh: '等待 fleet 注册…' },
   'setup.sync.someFailed': {
     en: 'Some repositories failed — check details on the fleet page.',

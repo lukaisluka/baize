@@ -160,13 +160,15 @@ function MainScreen() {
           )}
         </header>
         {/* First-run wizard (#16): until GitLab URL + PAT + selection exist
-            it owns the main column — the fleet is BaiZe's reason to exist,
-            and chat needs none of this, so a skip link stays one click away.
-            phase 'loading' renders the chat rather than flashing wizard. */}
-        {setup.phase === 'needed' && setup.settings ? (
-          <SetupWizard settings={setup.settings} onFinished={setup.refresh} />
-        ) : onSettings ? (
+            it owns the chat column — but never the settings route, which
+            stays reachable while unconfigured. The fleet is BaiZe's reason
+            to exist, and chat needs none of this, so the skip link stays
+            one click away; phase 'loading' renders the chat rather than
+            flashing the wizard. */}
+        {onSettings ? (
           <SettingsPage section={settingsSection} />
+        ) : setup.phase === 'needed' && setup.settings ? (
+          <SetupWizard settings={setup.settings} onFinished={setup.dismiss} />
         ) : (
           <>
             {doc.plan && doc.plan.length > 0 && <PlanDock entries={doc.plan} />}

@@ -155,6 +155,20 @@ const FLEET_HTML = `<!doctype html>
   </div>
 
   <div class="card">
+    <h2>Mirror sync</h2>
+    <div class="row">
+      <button id="sync-all">Sync now</button>
+      <span id="sync-interval" class="muted"></span>
+    </div>
+    <div id="sync-notice" class="error-text"></div>
+    <table id="sync-table" hidden>
+      <thead><tr><th>Repo</th><th>Status</th><th>Branch</th><th>Last sync</th><th>Revision</th></tr></thead>
+      <tbody id="sync-rows"></tbody>
+    </table>
+    <div id="sync-empty" class="muted">No mirrors yet — discover and sync above; discovered repositories clone into ~/.baize/repos/.</div>
+  </div>
+
+  <div class="card">
     <h2>Local repositories</h2>
     <form id="add-repo">
       <input name="path" placeholder="/absolute/path/to/git/repo" required>
@@ -281,6 +295,55 @@ const table = document.getElementById('repo-table');
 const rows = document.getElementById('rows');
 const empty = document.getElementById('empty');
 
+const syncTable = document.getElementById('sync-table');
+const syncRows = document.getElementById('sync-rows');
+const syncEmpty = document.getElementById('sync-empty');
+const syncNotice = document.getElementById('sync-notice');
+document.getElementById('sync-all').addEventListener('click', async () => {
+  syncNotice.textContent = 'Syncing…';
+  try {
+    const r = await api('/api/sync', { body: {} });
+    syncNotice.textContent = r.reason ? 'Sync skipped: ' + r.reason : 'Synced ' + r.synced + ' repo(s).';
+    refreshSync();
+  } catch (err) {
+    syncNotice.textContent = err.code === 'GITLAB_UNAUTHORIZED'
+      ? 'GitLab rejected the token — update it in the GitLab connection card above.'
+      : err.message;
+  }
+});
+
+async function refreshSync() {
+  let data = null;
+  try { data = await api('/api/sync', { method: 'GET' }); } catch { return; }
+  const states = Object.entries(data.states ?? {});
+  document.getElementById('sync-interval').textContent = 'polling every ' + data.pollIntervalMinutes + 'm';
+  syncEmpty.hidden = states.length > 0;
+  syncTable.hidden = states.length === 0;
+  syncRows.replaceChildren(...states.map(([name, st]) => {
+    const tr = document.createElement('tr');
+    const td = (content) => { const c = document.createElement('td'); c.append(content); return c; };
+    const chip = document.createElement('span');
+    chip.className = 'status ' + (st.status === 'needs-auth' || st.status === 'error' ? 'error' : st.status === 'idle' ? 'ready' : 'indexing');
+    chip.textContent = st.status;
+    if (st.status === 'needs-auth') chip.title = 'git authentication failed — check your SSH agent / credential helper (the GitLab token is not used for cloning)';
+    const branch = document.createElement('input');
+    branch.value = st.branch ?? '';
+    branch.placeholder = 'default';
+    branch.size = 8;
+    branch.title = 'branch override';
+    branch.addEventListener('change', async () => {
+      try {
+        await api('/api/sync/branch', { body: { name, branch: branch.value.trim() || null } });
+        refreshSync();
+      } catch (err) { syncNotice.textContent = err.message; }
+    });
+    const time = st.lastSyncAt ? new Date(st.lastSyncAt).toLocaleTimeString() : '';
+    tr.append(td(name), td(chip), td(branch), td(time), td((st.lastRevision ?? '').slice(0, 10)));
+    if (st.error) tr.title = st.error;
+    return tr;
+  }));
+}
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   errorBox.textContent = '';
@@ -331,7 +394,9 @@ async function refresh() {
 
 loadGlSettings();
 refresh();
+refreshSync();
 setInterval(refresh, 2000);
+setInterval(refreshSync, 3000);
 </script>
 </body>
 </html>
@@ -379,7 +444,7 @@ function readJsonBody(req) {
 // baize index arbitrary local paths, and DNS rebinding can forge the Host.
 // Every surface requires an explicit local Host; writes additionally require
 // a JSON content-type.
-async function handleApi(req, res, path, { registry, gitlab }) {
+async function handleApi(req, res, path, { registry, gitlab, sync }) {
   const getLike = req.method === 'GET' || req.method === 'HEAD'
 
   if (getLike && path === '/api/health') {
@@ -438,10 +503,41 @@ async function handleApi(req, res, path, { registry, gitlab }) {
     return sendJson(res, 200, await gitlab.discover(await readJsonBody(req)))
   }
 
+  if (getLike && path === '/api/sync') {
+    return sendJson(res, 200, {
+      states: sync.states(),
+      pollIntervalMinutes: sync.pollIntervalMinutes(),
+    })
+  }
+
+  if (req.method === 'POST' && path === '/api/sync') {
+    const contentType = req.headers['content-type'] ?? ''
+    if (!contentType.startsWith('application/json')) {
+      return sendJson(res, 415, { error: 'content-type must be application/json' })
+    }
+    const body = await readJsonBody(req)
+    const result = body?.name
+      ? await sync.syncNow(String(body.name))
+      : await sync.syncAll()
+    return sendJson(res, 200, result)
+  }
+
+  if (req.method === 'POST' && path === '/api/sync/branch') {
+    const contentType = req.headers['content-type'] ?? ''
+    if (!contentType.startsWith('application/json')) {
+      return sendJson(res, 415, { error: 'content-type must be application/json' })
+    }
+    const body = await readJsonBody(req)
+    if (typeof body?.name !== 'string' || !body.name.trim()) {
+      return sendJson(res, 400, { error: 'field "name" (repo name) is required' })
+    }
+    return sendJson(res, 200, sync.setBranch(body.name, body.branch === null ? null : String(body.branch ?? '').trim() || null))
+  }
+
   return sendJson(res, 404, { error: 'not found' })
 }
 
-export function createBaizeServer({ logger, registry, gitlab, uiDist } = {}) {
+export function createBaizeServer({ logger, registry, gitlab, sync, uiDist } = {}) {
   const spaAvailable = uiDist ? existsSync(join(uiDist, 'index.html')) : false
 
   return createServer(async (req, res) => {
@@ -459,7 +555,7 @@ export function createBaizeServer({ logger, registry, gitlab, uiDist } = {}) {
 
     try {
       if (path.startsWith('/api/')) {
-        status = await handleApi(req, res, path, { registry, gitlab })
+        status = await handleApi(req, res, path, { registry, gitlab, sync })
       } else if (getLike && (path === '/fleet' || path === '/fleet/')) {
         status = send(res, 200, FLEET_HTML, 'text/html; charset=utf-8')
       } else if (getLike && uiDist && spaAvailable) {

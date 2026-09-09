@@ -7,6 +7,7 @@ import { CbmSupervisor } from './cbm.js'
 import { createRepoRegistry } from './repos.js'
 import { createAcpBridge } from './acp-bridge.js'
 import { createGitLabService } from './gitlab.js'
+import { createSyncEngine } from './sync.js'
 
 // The built SPA: BAIZE_UI_DIST overrides; otherwise ui/dist next to src/
 // (repo checkout) — the packed layout (dist/ui) arrives with publishing.
@@ -33,8 +34,10 @@ export async function startApp({
   const cbm = new CbmSupervisor({ cacheDir: dirs.index, logger })
   const registry = createRepoRegistry({ config, save: () => saveConfig(home, config), logger, cbm })
   const gitlab = createGitLabService({ config, save: () => saveConfig(home, config), logger })
+  const sync = createSyncEngine({ home, config, save: () => saveConfig(home, config), gitlab, logger })
+  sync.start()
 
-  const server = createBaizeServer({ logger, registry, gitlab, uiDist })
+  const server = createBaizeServer({ logger, registry, gitlab, sync, uiDist })
   const bridge = createAcpBridge({
     server,
     home,
@@ -60,15 +63,18 @@ export async function startApp({
     cbm,
     registry,
     bridge,
+    sync,
     async stop() {
       logger.info('shutting down')
       // close(server) stops listening synchronously and resolves once every
       // connection is gone — upgraded sockets included. So: stop listening
       // first (no new /acp connections can spawn fresh children behind the
       // sweep), kill the agent children (their exit closes those sockets,
-      // letting the close resolve — it would hang otherwise), then CBM.
+      // letting the close resolve — it would hang otherwise), then in-flight
+      // git syncs, then CBM.
       const closed = close(server)
       await bridge.stop()
+      await sync.stop()
       await closed
       await cbm.stop()
     },

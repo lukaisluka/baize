@@ -28,13 +28,19 @@ The process binds 127.0.0.1 only and runs in the foreground; Ctrl-C stops it.
   WebSocket to `/acp` on this server. Each WebSocket connection spawns one
   agent child process; the bridge frames WebSocket messages to stdio
   JSON-RPC lines and back. Closing the tab terminates the agent.
-- **`/fleet`** — GitLab connection + repo discovery, and indexed-repository
-  status. Paste your GitLab base URL and a PAT (`read_api` scope is enough),
-  then discover a group recursively or an explicit repo list. The token is
-  stored in `~/.baize/config.json` (0600), used only for GitLab API calls,
-  never echoed back to any UI or written to logs. Mirroring/sync of the
-  discovered repos is upcoming work.
-- **`/api/*`** — health, repos, and GitLab settings/discovery endpoints.
+- **`/fleet`** — GitLab connection + repo discovery + mirror sync. Paste your
+  GitLab base URL and a PAT (`read_api` scope is enough), then discover a
+  group recursively or an explicit repo list. Discovered repos clone as bare
+  mirrors under `~/.baize/repos/` and stay current via polling (default 15m)
+  plus a manual **Sync now**; per-repo branch overrides pin the tracked
+  branch. Cloning uses system git with your ambient credentials (SSH agent /
+  credential helper) — the PAT is never embedded in a remote URL. Git
+  authentication failures mark the repo `needs-auth` and back off
+  exponentially; manual sync overrides the backoff. The token is stored in
+  `~/.baize/config.json` (0600), used only for GitLab API calls, never echoed
+  back to any UI or written to logs.
+- **`/api/*`** — health, repos, GitLab settings/discovery, and mirror-sync
+  state/control endpoints.
 
 ### Agent (OMP)
 
@@ -86,10 +92,10 @@ All state lives under `~/.baize/` (override with `BAIZE_HOME`):
 
 ```text
 ~/.baize/
-├── config.json      # defaults; agentCommand here; will hold GitLab URL + PAT (chmod 600)
+├── config.json      # GitLab URL + PAT (chmod 600), poll interval, branch overrides; agentCommand here
 ├── omp-overlay.yml  # OMP telemetry opt-out, written once by baize (editable)
 ├── agent/           # working directory for spawned agent processes
-├── repos/           # bare mirror clones (fleet sync, upcoming)
+├── repos/           # bare mirror clones kept current by fleet sync
 ├── index/           # CBM data (per-project SQLite DBs)
 └── logs/            # baize.log — startup, requests, CBM/agent lifecycle, shutdown
 ```

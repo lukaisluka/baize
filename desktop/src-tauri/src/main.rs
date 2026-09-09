@@ -137,21 +137,30 @@ fn try_reap(child: &mut Child) -> bool {
 }
 
 /// The authoritative cleanup (PRD §6.5: "the shell must kill the whole
-/// process tree on quit"). SIGTERM the group, give the server's graceful
-/// shutdown 5s to finish, then SIGKILL the survivors. Runs on RunEvent::Exit
-/// — synchronous, because tao ends the event loop with std::process::exit
-/// and async teardown would never run (same lesson as Panda's exit sweep).
+/// process tree on quit"). SIGTERM the child's PROCESS GROUP, give the
+/// server's graceful shutdown its worst-case budget, then SIGKILL the
+/// surviving group. A positive pid would only reach the server process
+/// itself — the whole point of the group kill is taking down git/OMP/CBM
+/// children when the server is wedged and cleans up nothing itself. Runs on
+/// RunEvent::Exit — synchronous, because tao ends the event loop with
+/// std::process::exit and async teardown would never run (same lesson as
+/// Panda's exit sweep).
 fn sweep_process_tree(child: &mut Child) {
     #[cfg(unix)]
     {
         if let Some(pid) = child.id() {
-            // SAFETY: signaling our own child's process group.
-            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-            let deadline = Instant::now() + Duration::from_secs(5);
+            // Negative pid = the child's process group (pgid == child pid,
+            // set at spawn). SAFETY: signaling our own child's group.
+            let pgid = -(pid as libc::pid_t);
+            unsafe { libc::kill(pgid, libc::SIGTERM) };
+            // The server's graceful path needs up to ~20s worst case:
+            // app.stop → cbm.stop (5s child-SIGKILL budget) + `daemon stop`
+            // (15s timeout). 25s covers it before we group-SIGKILL.
+            let deadline = Instant::now() + Duration::from_secs(25);
             while !try_reap(child) {
                 if Instant::now() >= deadline {
                     eprintln!("[baize-desktop] exit sweep: SIGKILLing the sidecar group");
-                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                    unsafe { libc::kill(pgid, libc::SIGKILL) };
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -175,10 +184,18 @@ async fn run_sidecar(app: tauri::AppHandle) {
     let port = free_port();
     eprintln!("[baize-desktop] sidecar port {port}");
 
-    let mut child = match spawn_sidecar(&app, port).await {
+    let child = match spawn_sidecar(&app, port).await {
         Ok(child) => child,
         Err(err) => return fatal(&app, err),
     };
+
+    // Manage IMMEDIATELY after spawn: both exit paths (RunEvent::Exit and
+    // the sigwait thread) sweep the managed child, so quitting during the
+    // up-to-30s health gate below still tears the sidecar down instead of
+    // orphaning it (process::exit skips destructors, kill_on_drop is dead
+    // code on this path — only the sweep reaches the child).
+    app.manage(std::sync::Mutex::new(child));
+    let child_state = app.state::<std::sync::Mutex<Child>>();
 
     // Health gate: 30s covers a cold first start (config bootstrap, CBM
     // binary check) without hanging forever on a broken sidecar.
@@ -187,19 +204,23 @@ async fn run_sidecar(app: tauri::AppHandle) {
         match health_check(port) {
             Ok(()) => break,
             Err(reason) => {
-                if try_reap(&mut child) {
+                let mut guard = child_state.lock().unwrap();
+                if try_reap(&mut guard) {
+                    drop(guard);
                     return fatal(
                         &app,
                         format!("sidecar exited before becoming healthy (log: {})", sidecar_log_path(&app).display()),
                     );
                 }
                 if Instant::now() >= deadline {
-                    let _ = child.start_kill();
+                    sweep_process_tree(&mut guard);
+                    drop(guard);
                     return fatal(
                         &app,
                         format!("sidecar not healthy after 30s: {reason} (log: {})", sidecar_log_path(&app).display()),
                     );
                 }
+                drop(guard);
                 std::thread::sleep(Duration::from_millis(250));
             }
         }
@@ -216,15 +237,15 @@ async fn run_sidecar(app: tauri::AppHandle) {
     .min_inner_size(720.0, 480.0)
     .build()
     {
-        let _ = child.start_kill();
+        let mut guard = child_state.lock().unwrap();
+        sweep_process_tree(&mut guard);
         return fatal(&app, format!("create window: {err}"));
     }
 
-    // Park the sidecar in managed state: Exit reads it for the sweep. The
-    // thread then parks forever holding the tokio runtime (the runtime
-    // owning the Child must outlive the app — dropping it would arm
+    // The sidecar stays parked in managed state for the Exit/sigwait
+    // sweeps; this thread parks forever holding the tokio runtime (the
+    // runtime owning the Child must outlive the app — dropping it would arm
     // kill_on_drop mid-session and kill a healthy server).
-    app.manage(std::sync::Mutex::new(child));
     std::future::pending::<()>().await;
 }
 

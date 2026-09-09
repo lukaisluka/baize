@@ -15,10 +15,16 @@ BaiZe's only browser-impossible jobs:
    daemon) work unchanged.
 2. **Kill the whole process tree on quit.** Tauri does not kill sidecar
    children. The shell spawns the sidecar in its own process group
-   (POSIX) and on `RunEvent::Exit` SIGTERMs the group — the server's
+   (POSIX) and on `RunEvent::Exit` SIGTERMs the **group**
+   (`kill(-pgid)` — a wedged server cleans up nothing itself, so the
+   group kill, not a single-pid kill, is the guarantee) — the server's
    graceful shutdown (`src/cli.js` SIGTERM path: close server, stop sync
-   git children, stop CBM + daemon) has 5 s to finish — then SIGKILLs
-   survivors. `kill_on_drop` covers teardown paths that reach destructors.
+   git children, stop CBM + daemon) gets 25 s (its own worst-case budget:
+   `cbm.stop`'s 5 s child budget + 15 s `daemon stop` timeout) — then
+   SIGKILLs the surviving group. The child is registered in managed
+   state immediately after spawn, so quitting during the 30 s startup
+   health gate sweeps it too. `kill_on_drop` covers teardown paths that
+   reach destructors.
 
 The window is created programmatically after `/api/health` answers, pointed
 at the sidecar's dynamically chosen port (that is why `tauri.conf.json`
@@ -34,9 +40,45 @@ cargo build --manifest-path desktop/src-tauri/Cargo.toml
 ./desktop/src-tauri/target/debug/baize-desktop
 ```
 
-The packager caches the Node dist archive under
-`~/.cache/baize-sidecar/`; `--node-version vX.Y.Z` overrides the default
-(match-the-running-Node).
+The packager caches the Node dist archive under `~/.cache/baize-sidecar/`
+(downloads are verified against nodejs.org's published `SHASUMS256.txt`;
+extraction is atomic — a temp dir renamed into place — so an interrupted
+run can't poison the cache); `--node-version vX.Y.Z` (or
+`--node-version=vX.Y.Z`) overrides the default (match-the-running-Node).
+
+### Unbundled release binary
+
+A bare `cargo build --release` binary resolves `resource_dir()` to
+`target/release/`, so it expects `target/release/baize/` (the bundle
+layout: `bin/node`, `src/`, ...). Symlink it to the assembled resources:
+
+```sh
+ln -sfn ../../resources/baize desktop/src-tauri/target/release/baize
+```
+
+### `tauri build` bundles (manual injection — upstream bug)
+
+`bundle.resources` in tauri.conf.json does NOT work for this resource
+tree on the current toolchain (tauri-utils 2.9.3): glob patterns
+(`resources/baize/**` in list or map form) fail with "path not found or
+didn't match any files", and non-glob entries (`resources/baize`,
+`resources/baize/*`) silently copy only the top-level files while
+skipping every directory — `bin/`, `src/`, `node_modules/`, `ui/` never
+make it into the bundle. Verified empirically against all four forms;
+the config key is therefore omitted. Revisit when tauri-utils fixes
+resource-tree copying, then bundle like this:
+
+```sh
+npx @tauri-apps/cli build --bundles app        # produces target/release/bundle/macos/BaiZe.app
+APP=desktop/src-tauri/target/release/bundle/macos/BaiZe.app
+cp -R desktop/src-tauri/resources/baize "$APP/Contents/Resources/baize"
+codesign --force --deep --options runtime \
+  --entitlements desktop/src-tauri/entitlements.plist --sign - "$APP"
+```
+
+This manual path is verified end-to-end: the bundled app resolves
+`Contents/Resources/baize/bin/node`, passes the health gate, and sweeps
+its whole process group on quit (see below).
 
 ## Signing (macOS, hardened runtime + JIT entitlements)
 
@@ -75,6 +117,20 @@ certificate and `notarytool` — out of scope for this feasibility issue.
   process-group sweep (works as-is); Tauri's webkitgtk dependency and the
   usual distro packaging (deb/AppImage) are the remaining work. Node dist
   archives for `linux-x64`/`linux-arm64` are the same tarball flow.
+
+## Known limits
+
+- **stdio host option in Settings**: Tauri injects `__TAURI_INTERNALS__`
+  into every webview, which makes the vendored UI light up its stdio
+  agent-host settings (Settings → Agent host). This shell does not
+  implement the `stdio_spawn` command behind it, so that option fails
+  fast if selected. Needs either a remote capability + command
+  implementation or UI suppression — tracked for the desktop follow-up.
+- `sidecar.log` is append-only (no rotation); it only ever contains the
+  server's stdout banner lines.
+- A dev binary launched from a terminal survives the terminal closing
+  (independent process group; SIGHUP is not masked) — the .app bundle is
+  the intended form.
 
 ## Layout
 

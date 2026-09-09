@@ -23,7 +23,8 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, createWriteStream, existsSync, mkdirSync, readlinkSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { copyFileSync, createWriteStream, existsSync, mkdirSync, readlinkSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir, platform, arch } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -46,13 +47,37 @@ function distPlatform() {
 }
 
 // Match the running Node by default — the sidecar behaves exactly like the
-// npm CLI (`npx baize`) does on this machine.
+// npm CLI (`npx baize`) does on this machine. Both `--node-version v1.2.3`
+// and `--node-version=v1.2.3` forms are accepted.
 function parseArgs(argv) {
-  const version = argv.includes('--node-version') ? argv[argv.indexOf('--node-version') + 1] : process.version
+  let version = process.version
+  for (const arg of argv) {
+    if (arg === '--node-version' || arg.startsWith('--node-version=')) {
+      version = arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : argv[argv.indexOf(arg) + 1]
+    }
+  }
   if (!/^v\d+\.\d+\.\d+$/.test(version ?? '')) {
     throw new Error(`--node-version: expected e.g. v24.16.0, got "${version}"`)
   }
   return { version }
+}
+
+/** Verify the downloaded archive against nodejs.org's published SHASUMS256.
+ * HTTPS alone is transport trust; the checksum pins the artifact. */
+async function verifySha256(version, archiveName, archivePath) {
+  const res = await fetch(`https://nodejs.org/dist/${version}/SHASUMS256.txt`)
+  if (!res.ok) throw new Error(`cannot fetch SHASUMS256.txt: ${res.status}`)
+  const sums = await res.text()
+  const line = sums.split('\n').find((l) => l.trim().endsWith(archiveName))
+  if (!line) throw new Error(`${archiveName} not listed in SHASUMS256.txt for ${version}`)
+  const expected = line.trim().split(/\s+/)[0].toLowerCase()
+  const hash = createHash('sha256')
+  hash.update(await readFile(archivePath))
+  const actual = hash.digest('hex')
+  if (actual !== expected) {
+    rmSync(archivePath, { force: true })
+    throw new Error(`sha256 mismatch for ${archiveName}: expected ${expected}, got ${actual} — deleted, retry the download`)
+  }
 }
 
 async function downloadNodeBinary(version) {
@@ -68,6 +93,14 @@ async function downloadNodeBinary(version) {
     return binaryCache
   }
   mkdirSync(cacheDir, { recursive: true })
+  // Stale extraction attempts from an interrupted run would otherwise be
+  // adopted as a cache hit below — the rename only happens on full success.
+  for (const stale of readdirSync(cacheDir, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && e.name.startsWith(`node-${version}-${plat}.tmp.`))
+    .map((e) => join(cacheDir, e.name))) {
+    console.log(`removing stale partial extraction ${stale}`)
+    rmSync(stale, { recursive: true, force: true })
+  }
   if (!existsSync(cachePath)) {
     console.log(`downloading ${url}`)
     const res = await fetch(url)
@@ -76,8 +109,14 @@ async function downloadNodeBinary(version) {
     const size = statSync(cachePath).size
     if (size < 1_000_000) throw new Error(`downloaded archive implausibly small (${size} bytes) — refusing`)
   }
-  mkdirSync(binaryCache, { recursive: true })
-  execFileSync('tar', ['-xzf', cachePath, '-C', binaryCache, '--strip-components', '1'])
+  await verifySha256(version, archiveName, cachePath)
+  // Extract to a temp dir, then atomically rename into the cache slot: an
+  // interrupted extraction must never become tomorrow's cache hit.
+  const tmpDir = join(cacheDir, `node-${version}-${plat}.tmp.${process.pid}`)
+  rmSync(tmpDir, { recursive: true, force: true })
+  mkdirSync(tmpDir, { recursive: true })
+  execFileSync('tar', ['-xzf', cachePath, '-C', tmpDir, '--strip-components', '1'])
+  renameSync(tmpDir, binaryCache)
   console.log(`node ${version} (${plat}): extracted to ${binaryCache}`)
   return binaryCache
 }

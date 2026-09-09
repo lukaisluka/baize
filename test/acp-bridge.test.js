@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { request as httpRequest } from 'node:http'
 import { readFileSync, rmSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
@@ -122,6 +123,48 @@ test('upgrade to a non-/acp path is destroyed', { timeout: 20000 }, async () => 
       return true
     },
   )
+})
+
+// Raw handshake control: `ws` neither sends Origin nor lets us forge Host.
+function upgradeRequest(headers) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        host: bound.host,
+        port: bound.port,
+        path: '/acp',
+        headers: {
+          connection: 'upgrade',
+          upgrade: 'websocket',
+          'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==',
+          'sec-websocket-version': '13',
+          ...headers,
+        },
+      },
+      (res) => resolve({ status: res.statusCode }),
+    )
+    req.on('upgrade', (res) => resolve({ status: res.statusCode, upgraded: true }))
+    req.on('error', (err) => (err.code === 'ECONNRESET' ? resolve({ destroyed: true }) : reject(err)))
+    req.end()
+    setTimeout(() => reject(new Error('upgrade probe timed out')), 5000).unref()
+  })
+}
+
+test('upgrade with a forged Host is destroyed (DNS-rebinding guard)', { timeout: 20000 }, async () => {
+  const outcome = await upgradeRequest({ host: 'evil.example.com' })
+  assert.ok(!outcome.upgraded, `expected no upgrade, got ${JSON.stringify(outcome)}`)
+})
+
+test('upgrade with a non-local browser Origin is destroyed', { timeout: 20000 }, async () => {
+  const outcome = await upgradeRequest({ origin: 'https://evil.example.com' })
+  assert.ok(!outcome.upgraded, `expected no upgrade, got ${JSON.stringify(outcome)}`)
+})
+
+test('upgrade with a local browser Origin is accepted', { timeout: 20000 }, async () => {
+  const outcome = await upgradeRequest({ origin: `http://localhost:${bound.port}` })
+  assert.equal(outcome.status, 101)
+  // The handshake spawned an agent child; drop the socket so it is reaped.
+  assert.equal(bridge.activeChildren(), 1)
 })
 
 test('agent stdout split across TCP reads yields intact separate frames', { timeout: 20000 }, async () => {

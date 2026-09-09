@@ -60,9 +60,11 @@ export async function startApp({
     bridge,
     async stop() {
       logger.info('shutting down')
-      await close(server)
-      // Server first (no new connections/calls), then agent children, then CBM.
+      // Agent children first: their exit closes the /acp sockets, so the
+      // server close below cannot hang on a live WebSocket connection
+      // (server.close() waits for every connection, upgraded ones included).
       await bridge.stop()
+      await close(server)
       await cbm.stop()
     },
   }

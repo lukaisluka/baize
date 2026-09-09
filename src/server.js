@@ -1,6 +1,7 @@
 import { createServer } from 'node:http'
 import { createReadStream, existsSync, statSync } from 'node:fs'
 import { extname, join, resolve, sep } from 'node:path'
+import { isLocalHostHeader } from './local-host.js'
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -31,7 +32,13 @@ const MIME_TYPES = {
 function serveStatic(res, distDir, urlPath) {
   const root = resolve(distDir)
   const relative = urlPath === '/' ? 'index.html' : urlPath.slice(1)
-  const candidate = resolve(root, decodeURIComponent(relative))
+  let decoded
+  try {
+    decoded = decodeURIComponent(relative)
+  } catch {
+    return send(res, 400, '{"error":"malformed path encoding"}\n', 'application/json')
+  }
+  const candidate = resolve(root, decoded)
   // Prefix must include the separator, else a sibling dir (ui/dist-evil)
   // would pass the check.
   if (candidate !== root && !candidate.startsWith(root + sep)) {
@@ -219,21 +226,16 @@ function readJsonBody(req) {
 // The API binds 127.0.0.1 only, but browsers happily send cross-site requests
 // to localhost: a hostile page can POST text/plain (no preflight) and make
 // baize index arbitrary local paths, and DNS rebinding can forge the Host.
-// Require an explicit local Host and, for writes, a JSON content-type.
-function isLocalHostHeader(host) {
-  return /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(host ?? '')
-}
-
+// Every surface requires an explicit local Host; writes additionally require
+// a JSON content-type.
 async function handleApi(req, res, path, { registry }) {
-  if (!isLocalHostHeader(req.headers.host)) {
-    return sendJson(res, 403, { error: 'forbidden: non-local Host header' })
-  }
+  const getLike = req.method === 'GET' || req.method === 'HEAD'
 
-  if (req.method === 'GET' && path === '/api/health') {
+  if (getLike && path === '/api/health') {
     return sendJson(res, 200, { status: 'ok' })
   }
 
-  if (req.method === 'GET' && path === '/api/repos') {
+  if (getLike && path === '/api/repos') {
     return sendJson(res, 200, { repos: await registry.list() })
   }
 
@@ -258,16 +260,25 @@ export function createBaizeServer({ logger, registry, uiDist } = {}) {
 
   return createServer(async (req, res) => {
     const path = req.url.split('?')[0]
+    // One guard for every surface (API, SPA, fleet) — not just /api/*:
+    // a DNS-rebound page must not read or drive anything on this server.
+    if (!isLocalHostHeader(req.headers.host)) {
+      const status = sendJson(res, 403, { error: 'forbidden: non-local Host header' })
+      logger?.info(`${req.method} ${path} -> ${status}`)
+      return
+    }
+    // HEAD rides the GET branches (Node suppresses the body for HEAD).
+    const getLike = req.method === 'GET' || req.method === 'HEAD'
     let status
 
     try {
       if (path.startsWith('/api/')) {
         status = await handleApi(req, res, path, { registry })
-      } else if (req.method === 'GET' && (path === '/fleet' || path === '/fleet/')) {
+      } else if (getLike && (path === '/fleet' || path === '/fleet/')) {
         status = send(res, 200, PLACEHOLDER_HTML, 'text/html; charset=utf-8')
-      } else if (req.method === 'GET' && uiDist && spaAvailable) {
+      } else if (getLike && uiDist && spaAvailable) {
         status = serveStatic(res, uiDist, path)
-      } else if (req.method === 'GET' && uiDist && !spaAvailable) {
+      } else if (getLike && uiDist && !spaAvailable) {
         status = send(res, 200, NO_BUILD_HTML, 'text/html; charset=utf-8')
       } else {
         status = sendJson(res, 404, { error: 'not found' })

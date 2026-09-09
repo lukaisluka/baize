@@ -18,12 +18,14 @@
     "ui"
   ],
   "files": [
-    "src"
+    "src",
+    "ui/dist"
   ],
   "scripts": {
     "start": "node src/cli.js",
     "build:ui": "npm run build -w ui",
-    "test": "node --test 'test/**/*.test.js'",
+    "prepack": "npm run build:ui",
+    "test": "node --test test/*.test.js",
     "test:ui": "npm run test -w ui"
   },
   "dependencies": {

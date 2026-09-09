@@ -158,7 +158,9 @@ baize CLI — single Node.js process (`npx baize`), binds 127.0.0.1 only
 
 ```text
 ~/.baize/
-├── config.json      # GitLab URL, PAT (chmod 600), poll interval, branch overrides
+├── config.json      # GitLab URL, PAT (chmod 600), poll interval, branch overrides, agentCommand
+├── omp-overlay.yml  # OMP telemetry opt-out, written once by baize (editable)
+├── agent/           # working directory for spawned agent processes
 ├── repos/           # bare mirror clones
 ├── index/           # CBM data
 └── logs/

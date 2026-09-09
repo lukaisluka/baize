@@ -15,6 +15,7 @@ upstream fixes is manual until a shared package is justified.
 | Excluded        | Why                                                        |
 | --------------- | ---------------------------------------------------------- |
 | `desktop/` (repo root) | Tauri shell — separate concern (#18), not needed for web UI. Note `src/desktop/boot.ts` is **kept**: the shared web build imports it (`main.tsx`), and `@tauri-apps/api` no-ops in a plain browser |
+| `desktop-acceptance.html` | manual acceptance page for Panda's desktop shell (#18) |
 | `test-agent/`   | Panda's own test agent; baize has its own bridge. **Exception**: `test-agent/fixtures/` is kept — `src/acp/claudeCodeContract.test.ts` reads the recorded claude-code wire fixtures during describe collection, so the suite goes red without them |
 | `docs/`         | Panda's docs; the bridge spec it carries is implemented in baize's `src/acp-bridge.js` |
 | `branding/`     | Panda brand assets                                          |

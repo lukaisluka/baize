@@ -134,18 +134,34 @@ test('POST /api/repos without JSON content-type is a 415 (cross-site text/plain 
 test('API requests with a non-local Host header are rejected (DNS-rebinding guard)', async () => {
   // fetch (undici) forbids overriding Host, so speak raw HTTP for this one.
   const { port } = new URL(base)
-  const status = await new Promise((resolve, reject) => {
-    const req = request(
-      { host: '127.0.0.1', port, path: '/api/repos', headers: { Host: 'evil.example.com' } },
-      (res) => {
-        res.resume()
-        res.on('end', () => resolve(res.statusCode))
-      },
-    )
-    req.on('error', reject)
-    req.end()
-  })
-  assert.equal(status, 403)
+  for (const path of ['/api/repos', '/', '/fleet']) {
+    const status = await new Promise((resolve, reject) => {
+      const req = request(
+        { host: '127.0.0.1', port, path, headers: { Host: 'evil.example.com' } },
+        (res) => {
+          res.resume()
+          res.on('end', () => resolve(res.statusCode))
+        },
+      )
+      req.on('error', reject)
+      req.end()
+    })
+    assert.equal(status, 403, `${path} with forged Host must 403`)
+  }
+})
+
+test('HEAD is served like GET (health-checker compatibility)', async () => {
+  const res = await fetch(new URL('/api/health', base), { method: 'HEAD' })
+  assert.equal(res.status, 200)
+
+  const page = await fetch(base, { method: 'HEAD' })
+  assert.equal(page.status, 200)
+  assert.match(page.headers.get('content-type'), /text\/html/)
+})
+
+test('malformed percent-encoding is a 400, not a 500', async () => {
+  const res = await fetch(new URL('/%FF%FE%25', base))
+  assert.equal(res.status, 400)
 })
 
 test('unknown /api paths and non-GET unknown paths get a JSON 404', async () => {

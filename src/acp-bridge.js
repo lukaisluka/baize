@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { WebSocketServer } from 'ws'
+import { isLocalHostHeader, isLocalOrigin } from './local-host.js'
 
 const MAX_PAYLOAD_BYTES = 16 * 1024 * 1024
 const CHILD_EXIT_GRACE_MS = 5000
@@ -67,8 +68,10 @@ export function createAcpBridge({ server, home, agentCommand = 'omp', logger }) 
       overlayWritten = true
     }
     mkdirSync(agentCwd, { recursive: true })
-    if (/omp$/.test(cmd)) {
+    if (basename(cmd) === 'omp') {
       // Hidden upstream mode: `--mode=acp` speaks ACP JSON-RPC on stdio.
+      // Exact basename match — a wrapper or a command merely ending in "omp"
+      // must not silently receive OMP-specific flags.
       return { cmd, args: [...args, '--mode=acp', '--config', overlayPath], cwd: agentCwd }
     }
     return { cmd, args, cwd: agentCwd }
@@ -78,7 +81,14 @@ export function createAcpBridge({ server, home, agentCommand = 'omp', logger }) 
 
   server.on('upgrade', (req, socket, head) => {
     const path = req.url.split('?')[0]
-    if (path !== '/acp') {
+    // The agent child is arbitrary command execution on this machine — the
+    // upgrade gets the same guards as the API: local Host (DNS-rebinding
+    // shield) and, when a browser sends Origin, a local Origin.
+    if (
+      path !== '/acp' ||
+      !isLocalHostHeader(req.headers.host) ||
+      !isLocalOrigin(req.headers.origin)
+    ) {
       socket.destroy()
       return
     }
@@ -102,7 +112,7 @@ export function createAcpBridge({ server, home, agentCommand = 'omp', logger }) 
       return
     }
     children.add(child)
-    logger?.info(`acp-bridge: agent child pid ${child.pid} (${agentCommand})`)
+    logger?.info(`acp-bridge: agent child ${child.pid ?? 'not started'} (${agentCommand})`)
 
     socket.on('error', (err) => logger?.warn(`acp-bridge: socket error: ${err.message}`))
     // EPIPE after child death must not crash the process (bridge contract §3).
@@ -111,9 +121,10 @@ export function createAcpBridge({ server, home, agentCommand = 'omp', logger }) 
     })
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (chunk) => {
-      // stderr is not a protocol channel — surface it for observability.
+      // stderr is not a protocol channel — surface it for observability,
+      // bounded so a chatty agent cannot flood baize.log.
       for (const line of chunk.split('\n')) {
-        if (line.trim()) logger?.info(`agent: ${line}`)
+        if (line.trim()) logger?.info(`agent: ${line.slice(0, 2000)}`)
       }
     })
 
@@ -132,9 +143,10 @@ export function createAcpBridge({ server, home, agentCommand = 'omp', logger }) 
         const line = buffer.slice(0, newline).trim()
         buffer = buffer.slice(newline + 1)
         if (!line) continue
-        if (isJsonLine(line) && socket.readyState === socket.OPEN) {
+        const json = isJsonLine(line)
+        if (json && socket.readyState === socket.OPEN) {
           socket.send(line)
-        } else if (!isJsonLine(line)) {
+        } else if (!json) {
           logger?.warn(`acp-bridge: dropped non-JSON agent stdout line: ${line.slice(0, 200)}`)
         }
       }

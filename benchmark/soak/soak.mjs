@@ -322,21 +322,28 @@ async function main() {
     lastChildPid: null,
   }
 
-  // First signal drains (bounded by the in-flight call timeouts); a second
-  // one force-exits — a wedged CBM (the #1955/#2107 failure mode this soak
-  // hunts) must not turn Ctrl-C into a 10-minute hang with no escalation.
-  let signalCount = 0
+  // First USER signal drains (bounded by the in-flight call timeouts); a
+  // second one force-exits — a wedged CBM (the #1955/#2107 failure mode this
+  // soak hunts) must not turn Ctrl-C into a 10-minute hang with no
+  // escalation. Only real signals escalate: internal FATAL paths (pre-flight,
+  // sampler, all-indexes-failed, mutation failure) also call stop(), and
+  // counting those would let "FATAL then one Ctrl-C" jump straight to
+  // process.exit before the finally block — no report, orphaned child/daemon.
+  let userSignalCount = 0
   const stop = (signal) => {
-    signalCount += 1
-    if (signalCount > 1) {
-      log(`${signal} again — forcing immediate exit (${ctx.m.inFlight} in-flight CBM calls abandoned)`)
-      process.exit(1)
-    }
     ctx.stopped = true
     log(`received ${signal} — draining (${ctx.m.inFlight} in-flight CBM calls)`)
   }
-  process.on('SIGINT', () => stop('SIGINT'))
-  process.on('SIGTERM', () => stop('SIGTERM'))
+  const onUserSignal = (signal) => {
+    userSignalCount += 1
+    if (userSignalCount > 1) {
+      log(`${signal} again — forcing immediate exit (${ctx.m.inFlight} in-flight CBM calls abandoned)`)
+      process.exit(1)
+    }
+    stop(signal)
+  }
+  process.on('SIGINT', () => onUserSignal('SIGINT'))
+  process.on('SIGTERM', () => onUserSignal('SIGTERM'))
 
   const sleepUnlessStopped = async (ms, step = 250) => {
     const until = Date.now() + ms
@@ -542,6 +549,13 @@ function buildReport(cfg, ctx, fleet) {
     ctx.m.indexOk > 0 && maxOf('walBytes') === 0
       ? 'no -wal files observed across the run despite active indexing — CBM 0.10.8 writes via stage-and-rename; watch stage.* totals and db growth instead'
       : null
+  // Symmetric honesty for stage: a zero here usually means the sampler (60s
+  // default) missed the ~seconds-long commit windows, not that no staging
+  // traffic existed — stage files were verified to appear mid-index (README).
+  const stageNote =
+    ctx.m.indexOk > 0 && maxOf('stageBytes') === 0
+      ? 'stage totals read 0 across all samples — stage files live only seconds and the sampler can miss the commit windows; read write amplification from cache.maxBytes and per-round db deltas instead'
+      : null
   return {
     config: {
       durationMs: cfg.durationMs,
@@ -564,6 +578,7 @@ function buildReport(cfg, ctx, fleet) {
       maxTotalBytes: maxOf('stageBytes'),
       maxSingleBytes: maxOf('stageMaxBytes'),
       finalTotalBytes: samples.at(-1)?.stageBytes ?? 0,
+      note: stageNote,
     },
     db: {
       maxBytes: maxOf('dbBytes'),

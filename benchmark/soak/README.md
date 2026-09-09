@@ -30,8 +30,11 @@ across runs so re-runs skip cloning).
 Everything lands under `--out`: `fleet/` (clones), `cache/` (CBM's
 `CBM_CACHE_DIR` — never the user's `~/.baize/index/`), `samples.jsonl` (one
 row per sample), `events.log` (every log line), `report.json` (final
-summary). Ctrl-C / SIGTERM drains the load, tears CBM down, and still writes
-the report; a repo that never completes a single index exits non-zero.
+summary). A first Ctrl-C / SIGTERM drains the load, tears CBM down, and
+still writes the report; a SECOND user signal force-exits immediately and
+abandons the report (internal FATAL paths don't count as signals — a FATAL
+followed by one Ctrl-C still produces the report). A repo that never
+completes a single index exits non-zero.
 
 ## Load model
 
@@ -66,7 +69,11 @@ Close to how baize actually drives CBM:
   the daemon is the child's direct child with `--cbm-daemon-internal`;
   index workers carry `--response-out` pointing into this run's cache dir.
   Anything else is counted as unattributed and never adopted — the report
-  surfaces `unattributed.maxCount`; a healthy run reads 0. Caveat: worker
+  surfaces `unattributed.maxCount`; a healthy run reads 0. Scope caveat: the
+  counter only sees processes carrying THIS checkout's binary path — a
+  foreign CBM running from a different path (the packaged desktop sidecar,
+  `~/.local/bin`) is neither attributable nor counted, so "0" means "no
+  same-binary foreign activity", not "no CBM activity at all". Caveat: worker
   attribution matches the cache-dir string as written, so passing an
   `--out` whose *realpath* differs from its written path (a custom symlinked
   parent) can mis-attribute this run's workers as unattributed — the

@@ -1,0 +1,35 @@
+name: PR Title
+
+# PR titles must follow Conventional Commits (English). The SSOT is the
+# "Commit convention" section in AGENTS.md — keep the type set in sync with
+# it. Squash-merge uses the PR title as the commit subject, so only the
+# title is linted, not intermediate commits on the branch.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  conventional-title:
+    runs-on: ubuntu-latest
+    steps:
+      # Pure-regex check, no third-party actions (no new supply-chain
+      # surface); the title comes from the event payload, no checkout needed
+      - name: Lint PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|docs|refactor|perf|test|chore|ci|build)(\([a-z0-9-]+\))?: .+( \(#[0-9]+\))+$'
+          if [[ "$PR_TITLE" =~ $pattern ]]; then
+            echo "OK: $PR_TITLE"
+          else
+            echo "::error::PR title must match: <type>(<scope>): <imperative English subject> (#issue)"
+            echo "::error::types: feat fix docs refactor perf test chore ci build"
+            echo "::error::scope (optional): a lowercase repo area, e.g. (docs)"
+            echo "::error::trailing issue reference required, e.g. (#1)"
+            echo "::error::got: $PR_TITLE"
+            exit 1
+          fi

@@ -20,6 +20,13 @@ npx baize --no-open  # do not open the browser
 
 The process binds 127.0.0.1 only and runs in the foreground; Ctrl-C stops it.
 
+On first run (empty `~/.baize/`) the chat UI opens a **setup wizard**: paste
+your GitLab URL + PAT, pick a group or explicit repos (the wizard shows the
+repo count and a disk estimate from GitLab statistics before anything is
+cloned), then watch the first mirror sync and indexing run live. Setup can
+be skipped — chat works without the fleet — and the same surfaces stay
+available on `/fleet` afterwards.
+
 ## What it serves
 
 - **`/`** — the chat UI (vendored from

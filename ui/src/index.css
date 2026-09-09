@@ -1,0 +1,504 @@
+/* Astryx design system, no Tailwind (#32 Phase 3). Astryx's CSS files declare
+ * their own layers internally (reset / astryx-base / astryx-theme); Panda's
+ * own styles are unlayered, which beats every named layer — the intentional
+ * override point for bespoke surfaces (same rule the .md-body block always
+ * relied on). */
+@import "@astryxdesign/core/reset.css";
+@import "@astryxdesign/core/astryx.css";
+/* Latin body face (joint-debug): the reference client's Latin glyphs match
+ * Inter (tall x-height, straight-stem l, straight-tail y, no-serif 1), not
+ * SF Pro that -apple-system renders — that stack left mixed-script text a
+ * notch thinner and narrower than the reference. Self-hosted variable font,
+ * no CDN dependency. */
+@import "@fontsource-variable/inter";
+/* Mono face (joint-debug): paired with Inter, and pinned for the same
+ * ownership reason — neutral's system mono (SF Mono) visibly differed from
+ * the reference client's code glyphs. */
+@import "@fontsource-variable/jetbrains-mono";
+/* All seven official themes (#32 Phase 4): each theme.css is @scope'd under
+ * its own data-astryx-theme attribute, so they coexist and only the one
+ * <Theme> anchors is live. Selection is a runtime user choice (src/theme.ts). */
+@import "@astryxdesign/theme-neutral/theme.css";
+@import "@astryxdesign/theme-matcha/theme.css";
+@import "@astryxdesign/theme-stone/theme.css";
+@import "@astryxdesign/theme-butter/theme.css";
+@import "@astryxdesign/theme-chocolate/theme.css";
+@import "@astryxdesign/theme-gothic/theme.css";
+@import "@astryxdesign/theme-y2k/theme.css";
+
+/* Panda token aliases onto Astryx system tokens (#32 Phase 1). Values resolve
+ * at runtime, so the matcha theme and light/dark switching flow through every
+ * plain-CSS reference untouched. Phase 3 moved these out of Tailwind's @theme
+ * into plain :root declarations — same names, same resolution.
+ *
+ * --color-muted intentionally means secondary TEXT here (Astryx's own
+ * --color-muted is a background token; our name predates the system's).
+ * --color-border / --color-accent are not redeclared: same name as the
+ * system token, and var(--color-border|accent) resolves to the :root values
+ * the matcha theme already provides. */
+:root {
+  --color-bg: var(--color-background-body);
+  --color-surface: var(--color-background-surface);
+  --color-raised: var(--color-background-muted);
+  --color-fg: var(--color-text-primary);
+  /* 信息性次级文本的 AA 硬约束(#212):chocolate 亮色下主题自带的
+   * text-secondary 实测仅 3.06:1,不掺深到 primary 一档就到不了 4.5:1。
+   * 派生而非写死,主题切换时随两端 token 缩放;实测(chocolate):
+   * 亮 4.78 / 暗 10.36。faint 是装饰层(marker/meta/placeholder),
+   * 不承诺 AA——信息性文字一律用本档或更深的档位。 */
+  --color-muted: color-mix(in oklab, var(--color-text-secondary), var(--color-text-primary) 35%);
+  --color-faint: var(--color-text-disabled);
+  --color-warn: var(--color-warning);
+  --color-danger: var(--color-error);
+  --color-add: var(--color-success);
+  --color-diff-add: var(--color-success-muted);
+  --color-diff-del: var(--color-error-muted);
+
+  --font-sans: var(--font-family-body);
+  --font-mono: var(--font-family-code);
+}
+
+/* ---------------------------------------------------------------------------
+ * Fonts — Panda owns the typefaces, not the themes.
+ *
+ * Inter (self-hosted variable) for Latin + the system CJK stack (PingFang
+ * SC on macOS, YaHei on Windows): the reference client's Latin glyphs are
+ * Inter's — tall x-height, straight-stem l, straight-tail y — which
+ * -apple-system (SF Pro) does not reproduce, and theme webfonts (Figtree
+ * etc.) thinned the text further. Inter has no CJK coverage, so mixed
+ * scripts fall through to the system stack for Han.
+ *
+ * JetBrains Mono (self-hosted variable) for every code surface — inline
+ * code, fenced blocks, diffs, tool payloads. The classic Inter pairing,
+ * and it replaces both theme monos (JetBrains Mono on matcha as a webfont,
+ * SF Mono via neutral's system stack) so code renders identically across
+ * themes. Both declared on :root AND [data-astryx-theme] (both Astryx
+ * anchors re-inject theme tokens), and unlayered so every theme layer
+ * loses. Astryx components keep consuming --font-family-*, now fed from
+ * --panda-font-body / --panda-font-code.
+ * ------------------------------------------------------------------------- */
+:root,
+[data-astryx-theme] {
+  --panda-font-body: 'Inter Variable', -apple-system, BlinkMacSystemFont,
+    'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+    sans-serif;
+  --font-family-body: var(--panda-font-body);
+  --font-family-heading: var(--panda-font-body);
+
+  --panda-font-code: 'JetBrains Mono Variable', ui-monospace, 'SF Mono',
+    'Cascadia Code', Menlo, Consolas, monospace;
+  --font-family-code: var(--panda-font-code);
+}
+
+/* Pin the type scale across all seven themes (joint-debug finding, #32
+ * follow-up): themes ship their own full --font-size-* ladders and split
+ * into two density presets — comfortable (matcha/gothic/y2k, base 1rem) vs
+ * compact (neutral/stone/butter/chocolate, base 0.875rem). Letting the
+ * ladder switch rescaled message text 14↔16px on theme switch while
+ * Panda's card components stayed pinned at px — half-following looked
+ * like a bug. Same rationale and mechanism as --space-* below: values are
+ * core defaults, and unlayered declarations beat every theme layer.
+ * Declared on :root AND on [data-astryx-theme] because Astryx anchors
+ * themes on two elements (html for color-scheme, App's <Theme> div for
+ * the component tree) and each anchor re-injects the theme ladder — a
+ * :root-only pin never reaches past the inner div's own declaration.
+ * Weights still follow the theme; sizes and families are Panda's.
+ *
+ * Type roles (joint-debug, SSOT in DESIGN.md「字体」): 14px = content
+ * (whole message stream + composer input), 13px = chrome (sidebar rows,
+ * connect panel, header title), 11px = micro (statusbar, labels, meta,
+ * hints). Hierarchy is tier × grayscale — no second content size.
+ *
+ * The ladder is now USER-CONFIGURABLE (#171): --panda-size-content is the
+ * ui knob (Settings stepper, default 14) and --panda-size-code the code
+ * knob (default 12, ZCode-style one step denser). chrome/micro derive by
+ * calc so one knob moves the whole scale, and every ladder rung is a
+ * calc() off content — Astryx components scale together with Panda's own
+ * surfaces (the same half-following lesson). fontSize.ts applies the
+ * knobs as inline custom properties on <html>.
+ *
+ * Anchor asymmetry is load-bearing: the --font-size-* ladder stays on the
+ * dual anchor (:root + [data-astryx-theme]) because each anchor carries a
+ * theme @layer ladder it must beat; but the --panda-size-* knobs sit on
+ * :root ONLY — the Theme div must NOT re-declare them, or its sheet
+ * declaration would beat the inherited inline override from <html> (the
+ * exact "never reaches past the inner div" trap, in reverse). Themes
+ * never declare --panda-size-* anywhere, so there is nothing to outscale
+ * on the second anchor. */
+
+:root {
+  --panda-size-content: 14px;
+  --panda-size-chrome: calc(var(--panda-size-content) - 1px);
+  --panda-size-micro: calc(var(--panda-size-content) - 3px);
+  --panda-size-code: 12px;
+}
+
+:root,
+[data-astryx-theme] {
+  --font-size-4xs: calc(var(--panda-size-content) - 8px);
+  --font-size-3xs: calc(var(--panda-size-content) - 7px);
+  --font-size-2xs: calc(var(--panda-size-content) - 6px);
+  --font-size-xs: calc(var(--panda-size-content) - 4px);
+  --font-size-sm: calc(var(--panda-size-content) - 2px);
+  --font-size-base: var(--panda-size-content);
+  --font-size-lg: calc(var(--panda-size-content) + 3px);
+  --font-size-xl: calc(var(--panda-size-content) + 6px);
+  --font-size-2xl: calc(var(--panda-size-content) + 10px);
+  --font-size-3xl: calc(var(--panda-size-content) + 15px);
+  --font-size-4xl: calc(var(--panda-size-content) + 21px);
+  --font-size-5xl: calc(var(--panda-size-content) + 28px);
+
+  /* Chrome text (tool rows, thinking rows): ZCode keeps process rows at
+   * ~3:1 contrast — clearly present, clearly not content. Sits between
+   * muted and faint so both polarities weaken symmetrically. */
+  --panda-chrome-text: color-mix(in oklab, var(--color-muted) 30%, var(--color-faint) 70%);
+}
+
+/* ZCode contrast calibration (joint-debug): neutral ships a #f1f1f1 body
+ * which flattens the hierarchy — near-black text can't read deep enough
+ * and mid-gray chrome reads muddy. The reference client sits on #f8f8f7;
+ * lifting only the light side restores both directions at once (dark
+ * side keeps the theme's #1b1b1b). Scoped to neutral: other themes own
+ * their own tinted bodies.
+ *
+ * The :root[...] arm must out-specify the theme's @scope rules — @scope
+ * preambles DO count into specificity ((0,2,0) here) and the html anchor
+ * is where :root's --color-bg alias resolves, so a bare attribute
+ * selector (0,1,0) gets overridden back on html (the div anchor, being
+ * the scope's exclusive lower bound, has no competing theme rule). */
+:root[data-astryx-theme='neutral'],
+[data-astryx-theme='neutral'] {
+  --color-background-body: light-dark(#f8f8f7, #1b1b1b);
+}
+
+:root {
+  /* Panda geometry stayed on a 4px step when Tailwind left (#32 Phase 1
+   * pinned --spacing for the same reason: matcha's --spacing-1 is 6px and
+   * a straight swap rescales the whole layout 1.5x). Component CSS uses
+   * --space-N; Astryx components keep their internal --spacing-* scale. */
+  --space-0_5: 2px;
+  --space-1: 4px;
+  --space-1_5: 6px;
+  --space-2: 8px;
+  --space-2_5: 10px;
+  --space-3: 12px;
+  --space-3_5: 14px;
+  --space-4: 16px;
+  --space-5: 20px;
+
+  /* Radius: the bridge mapped Tailwind names onto the matcha scale in
+   * Phase 1; these keep those exact resolutions. */
+  --panda-radius-md: var(--radius-element);
+  --panda-radius-lg: var(--radius-container);
+  --panda-radius-xl: var(--radius-page);
+  --panda-radius-2xl: 16px;
+  --panda-radius-full: var(--radius-full);
+
+  --panda-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --panda-colors-transition: color 150ms var(--panda-ease), background-color 150ms var(--panda-ease), border-color 150ms var(--panda-ease);
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  /* No hardcoded color-scheme: light/dark flips ride on light-dark() tokens,
+   * and <Theme> owns the scheme so both modes stay in sync (#32). */
+  background-color: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  /* Un-do the Astryx reset's antialiased/grayscale smoothing: on macOS it
+   * thins every glyph (no subpixel AA), which read as "our font is thinner
+   * than the reference client". `auto` restores platform default and the
+   * unlayered rule beats the reset layer. */
+  -webkit-font-smoothing: auto;
+  -moz-osx-font-smoothing: auto;
+}
+
+/* Keep keyboard focus visible while using Panda's own accent system. */
+:where(button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+/* Opt-out for text entry nested inside a focus-styled surface (e.g. the
+ * composer box, whose own border is the focus affordance). Unlayered, like
+ * the rule above — a layered utility could not override it. */
+.focus-outline-none:focus-visible {
+  outline: none;
+}
+/* Same policy for Astryx TextInput (#109): its wrapper IS the focus
+ * affordance (accent border + inset glow on focus-within), so the native
+ * input inside must not also paint the global outline — the doubled inner
+ * frame reads as a thick black box around the typing area, especially in
+ * warm themes where the accent is a dark brown. Scoped to inputs inside the
+ * wrapper: bare checkboxes/inputs elsewhere keep the keyboard outline. */
+.astryx-text-input input:focus-visible {
+  outline: none;
+}
+
+/* Astryx toasts (#160). useToast's fallback viewport mounts at document.body;
+ * it mirrors the html theme attrs so tokens resolve inside, but the error
+ * variant paints --color-background-error-inverted — a token the matcha
+ * theme never defines, so it falls back to core #AA071E with near-black
+ * MediaTheme text on top: unreadable. Panda owns the toast surface instead:
+ * a quiet card on --color-background-card (the same pairing every dialog
+ * uses), a red rail for errors, chrome-size type. Anchors are themeProps'
+ * stable data attributes — the stylex class names churn per build. */
+.astryx-toast {
+  font-size: var(--panda-size-chrome); /* chrome role (DESIGN.md「字体」) */
+  line-height: 1.5;
+  color: var(--color-text-primary);
+  background: var(--color-background-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--panda-radius-md);
+  box-shadow: var(--shadow-med);
+  padding: var(--space-2_5) var(--space-3);
+}
+.astryx-toast[data-type='error'] {
+  border-inline-start: 3px solid var(--color-error);
+}
+
+/* Touch floor (#107): on coarse pointers interactive controls get the 44px
+ * minimum hit size (Apple HIG; Material asks 48 but 44 is the classic chat-app
+ * compromise). Scoped to (pointer: coarse), so the desktop density is
+ * untouched. Unlayered, so it beats the Astryx layers' fixed height/width
+ * utilities (min-height/min-width constrain them). Two deliberate exclusions:
+ * inline .md-body links (a 44px floor would blow open message line boxes) and
+ * the in-card micro controls that keep their visual size and grow an
+ * invisible hit area instead (.composer-remove, .md-codeblock-copy — their
+ * local coarse rules). */
+@media (pointer: coarse) {
+  button, select, [role='button'] {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  textarea,
+  input:not([type='checkbox'], [type='radio'], [type='file']) {
+    min-height: 44px;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Shared primitives (#32 Phase 3). Tiny fixed vocabulary used across
+ * components; everything else lives in the co-located per-component CSS.
+ * ------------------------------------------------------------------------- */
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mono {
+  font-family: var(--font-mono);
+}
+/* Live think/thought rows: a fixed-width single-line window onto the tail of
+ * the reasoning stream. dir="rtl" anchors the text to the right and cuts on
+ * the LEFT (ellipsis lands there), so as the text grows the newest part
+ * stays visible — it reads as content flushing leftwards. unicode-bidi:
+ * plaintext keeps Latin/CJK glyph order intact inside the rtl line box.
+ * Shared by ToolCallCard (think tool calls) and ThoughtBlock (thought
+ * chunks). */
+.tool-think-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  unicode-bidi: plaintext;
+  color: var(--color-faint);
+}
+@keyframes panda-pulse {
+  50% { opacity: 0.5; }
+}
+.pulse {
+  animation: panda-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pulse { animation: none; }
+}
+
+/* The virtualized stream owns the scrollbar. With classic (space-taking)
+ * scrollbars its content box loses scrollbar width, so reserve it
+ * symmetrically: while the max-w-3xl column is centered inside the stream,
+ * symmetric gutters keep the transcript and the composer below it sharing
+ * the same edges. Below this width the column is full-width and the gutter
+ * would instead inset it on both sides, so the rule only applies while
+ * the column is centered: 240px sidebar + 768px column + 2× scrollbar
+ * (≤17px) ≈ 1042px. Overlay-scrollbar platforms (macOS) reserve nothing
+ * and are unaffected at any width. */
+@media (min-width: 1050px) {
+  .message-scroller {
+    scrollbar-gutter: stable both-edges;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Markdown body — agent/user message typography.
+ * react-markdown emits native elements, so styling lives here instead of
+ * wrapping every element in components.
+ * ------------------------------------------------------------------------- */
+.md-body {
+  /* Content tier (default 14px) / 1.6 — terminal-client density (ZCode-style).
+   * One size for the whole content area (joint-debug): hierarchy is carried
+   * by weight and grayscale only — secondary surfaces (tool bodies,
+   * thoughts) use the same size with muted color. Block gaps (cards at
+   * content↔text) stay under a line of body text so block boundaries read
+   * stronger than line breaks. */
+  font-size: var(--panda-size-content);
+  line-height: 1.6;
+  /* Long unbreakable runs (auto-linked URLs, tokens pasted by the user)
+   * must wrap inside the column — measured overflowing the message
+   * scroller by ~960px without this (#150 audit). Same tool as
+   * ElicitationCard's oauth-URL rule. Code blocks keep their own
+   * horizontal scroll (white-space: pre ignores wrap opportunities). */
+  overflow-wrap: anywhere;
+}
+.md-body > :first-child { margin-top: 0; }
+.md-body > :last-child { margin-bottom: 0; }
+/* p must re-inherit the container size: theme reset layers declare
+ * :where(p) { font-size: var(--font-size-base) } and an element's own
+ * declaration always beats inheritance — without this, paragraphs ran one
+ * step larger than lists in the same message. */
+.md-body p { margin: 0.5em 0; font-size: inherit; line-height: inherit; }
+.md-body strong { font-weight: 600; color: var(--color-fg); }
+.md-body em { color: var(--color-muted); }
+.md-body ul { margin: 0.5em 0; padding-left: 1.5em; list-style: disc; }
+.md-body ol { margin: 0.5em 0; padding-left: 1.5em; list-style: decimal; }
+.md-body li { margin: 0.2em 0; }
+.md-body li::marker { color: var(--color-faint); }
+
+/* Headings stay at body size (joint-debug): one size per content area,
+ * hierarchy via weight (600) and margins alone. */
+.md-body h1, .md-body h2, .md-body h3,
+.md-body h4, .md-body h5, .md-body h6 {
+  margin: 1em 0 0.4em;
+  font-weight: 600;
+  font-size: 1em;
+  line-height: 1.3;
+}
+
+.md-body blockquote {
+  margin: 0.5em 0;
+  padding-left: 0.75em;
+  border-left: 2px solid var(--color-border);
+  color: var(--color-muted);
+}
+
+.md-body a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--color-faint);
+  text-underline-offset: 2px;
+}
+.md-body a:hover { text-decoration-color: var(--color-fg); }
+
+.md-body img { max-width: 100%; border-radius: 8px; }
+
+.md-body hr { margin: 1em 0; border: 0; border-top: 1px solid var(--color-border); }
+
+.md-body table {
+  display: block;
+  max-width: 100%;
+  margin: 0.6em 0;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+.md-body th, .md-body td {
+  border: 1px solid var(--color-border);
+  padding: 0.25em 0.6em;
+  text-align: left;
+}
+.md-body th { background: var(--color-raised); font-weight: 600; }
+
+.md-body code {
+  font-family: var(--font-mono);
+  /* Same size as body text — ZCode-style: inline code is differentiated by
+   * the mono face + tinted background, never by a border or a smaller
+   * size. */
+  font-size: 1em;
+  background: var(--color-raised);
+  padding: 0.15em 0.4em;
+  border-radius: 5px;
+}
+/* Fenced blocks render through CodeBlock (header + shiki tokens, below).
+ * This stays as the fallback for bare <pre> edges; direct child only so
+ * CodeBlock's inner <pre> is styled by .md-codeblock instead. */
+.md-body > pre {
+  margin: 0.6em 0;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--panda-size-code);
+  line-height: 1.6;
+}
+.md-body > pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+}
+
+/* CodeBlock: language tag + copy button header over shiki token spans. */
+.md-codeblock {
+  margin: 0.6em 0;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.md-codeblock-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 5px 3px 10px;
+  background: var(--color-raised);
+  border-bottom: 1px solid var(--color-border);
+}
+.md-codeblock-lang {
+  font-family: var(--font-mono);
+  font-size: var(--panda-size-code);
+  line-height: 1.5;
+  color: var(--color-faint);
+}
+.md-codeblock-copy {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  width: 22px;
+  border-radius: 5px;
+  color: var(--color-faint);
+  transition: color 0.15s, background-color 0.15s;
+}
+.md-codeblock-copy:hover {
+  background: var(--color-bg);
+  color: var(--color-fg);
+}
+/* Coarse-pointer exception (#107): 22px visual (a 44px button would dominate
+ * the code header), finger target grows invisibly instead — ::after
+ * participates in hit testing, 22 + 2×11 = 44. position: relative is the
+ * containing block for it. */
+@media (pointer: coarse) {
+  .md-codeblock-copy {
+    position: relative;
+    min-height: 22px;
+    min-width: 22px;
+  }
+  .md-codeblock-copy::after {
+    content: '';
+    position: absolute;
+    inset: -11px;
+  }
+}
+.md-codeblock pre {
+  margin: 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--panda-size-code);
+  line-height: 1.6;
+}

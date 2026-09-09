@@ -1,0 +1,105 @@
+/* App shell: header bar, main column, mobile navigation overlay. */
+
+.app-shell {
+  display: flex;
+  /* dvh (SettingsPage.css precedent): 100vh is the mobile LARGEST viewport —
+   * once the URL bar collapses, the composer at the bottom sits below the
+   * visible area. */
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.app-nav-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: color-mix(in oklab, var(--color-bg) 70%, transparent);
+}
+@media (min-width: 768px) {
+  .app-nav-overlay { display: none; }
+}
+
+.app-main {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  /* Positioning context for the plan dock (absolute, top-right). */
+  position: relative;
+}
+
+.app-header {
+  display: flex;
+  height: 56px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--color-border);
+  padding-inline: 12px;
+}
+@media (min-width: 640px) {
+  .app-header { padding-inline: 24px; }
+}
+
+.app-header-lead {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-nav-toggle {
+  display: flex;
+  height: 32px;
+  width: 32px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--panda-radius-md);
+  color: var(--color-muted);
+  transition: var(--panda-colors-transition);
+}
+.app-nav-toggle:hover {
+  background: var(--color-raised);
+  color: var(--color-fg);
+}
+@media (min-width: 768px) {
+  .app-nav-toggle { display: none; }
+}
+
+.app-header-title {
+  font-size: var(--panda-size-chrome);
+  font-weight: 500;
+}
+
+.app-header-meta {
+  display: none;
+  flex-shrink: 0;
+  /* Endpoint form: mono URL that can run arbitrarily long (a direct
+   * connect with tokens in the path measured 144px past the shell) —
+   * clamp the same way the --desc variant does (#150 audit). */
+  max-width: 44ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--panda-size-micro);
+  color: var(--color-faint);
+}
+@media (min-width: 768px) {
+  .app-header-meta { display: block; }
+}
+
+/* Settings-route variant (#140): the section description reads as prose, not
+ * an endpoint — regular face, quiet color, clamped so long descriptions
+ * (diagnostics) never crowd the title out of the bar. */
+.app-header-meta--desc {
+  max-width: 44ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: inherit;
+  font-size: var(--panda-size-micro);
+  color: var(--color-muted);
+}

@@ -1,0 +1,596 @@
+/* Settings content (#/settings) — lives INSIDE MainScreen's main column
+ * (#111): sidebar/header chrome stays, this block is the column's scrollable
+ * content, so it sits on the same body background as the message stream and
+ * owns no chrome of its own. Cards share the composer card's material
+ * (surface + border, no shadow, 16px radius, 720px column) so the settings
+ * page reads as the same application, not a swapped-in product page. */
+
+.settings-page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.settings-body {
+  padding: 28px 20px 40px;
+  /* One section per page (#117): the body is keyed by section id, so every
+   * switch remounts and replays this entrance — the visible "something
+   * happened" feedback that scroll-jumping could never provide on a page
+   * shorter than one viewport. */
+  animation: settings-section-in 160ms ease;
+}
+
+@keyframes settings-section-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-body {
+    animation: none;
+  }
+}
+
+/* --- Row cards (#138: Codex-style one-setting-per-row; page header lives
+ * in the top bar since #140) --- */
+
+/* Group head (#140): a group title may carry its page action on the right
+ * (Codex puts create/edit actions on the group head, not the page header). */
+.settings-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 4px;
+}
+
+.settings-group-head .settings-group-title {
+  margin: 0;
+}
+
+.settings-group-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* --- MCP text view (#142): whole-config JSON/YAML editor --- */
+
+.settings-mcp-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-mcp-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-mcp-toolbar-actions {
+  display: flex;
+  gap: 8px;
+  margin-inline-start: auto;
+}
+
+/* Format pill: the swatch-chip language scaled down to a two-option pill.
+ * Also the Form|Text input-mode switch at the top of the MCP form (#146). */
+.settings-mcp-format {
+  display: flex;
+  border: 1px solid var(--color-border);
+  border-radius: var(--panda-radius-full);
+  overflow: hidden;
+}
+
+.settings-mcp-format-item {
+  padding: 3px 10px;
+  border: none;
+  background: var(--color-surface);
+  color: var(--color-muted);
+  font: inherit;
+  font-size: var(--panda-size-micro);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  transition: var(--panda-colors-transition);
+}
+
+.settings-mcp-format-item + .settings-mcp-format-item {
+  border-inline-start: 1px solid var(--color-border);
+}
+
+.settings-mcp-format-item:not(:disabled):hover {
+  color: var(--color-fg);
+}
+
+.settings-mcp-format-item--active {
+  background: color-mix(in oklab, var(--color-accent) 14%, transparent);
+  color: var(--color-accent);
+}
+
+.settings-mcp-format-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Pin the editor's face to mono — config text, not prose. */
+.settings-mcp-editor textarea {
+  font-family: var(--font-mono);
+  font-size: var(--panda-size-chrome);
+  line-height: 1.6;
+}
+
+.settings-mcp-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--panda-radius-lg);
+  font-size: var(--panda-size-micro);
+  line-height: 1.55;
+  color: var(--color-muted);
+}
+
+.settings-mcp-notes p {
+  margin: 0;
+}
+
+.settings-mcp-skip-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-mcp-skip-list li {
+  display: flex;
+  gap: 8px;
+}
+
+.settings-mcp-skip-name {
+  font-weight: 500;
+  color: var(--color-fg);
+}
+
+/* Group title: plain text head of a card whose content is SettingsRows —
+ * the card icon chip is gone, the group title sets the rhythm. */
+.settings-group-title {
+  margin: 0 0 4px;
+  font-size: var(--panda-size-chrome);
+  font-weight: 600;
+}
+
+.settings-card {
+  max-width: 720px;
+  margin: 0 auto 16px;
+  padding: 18px 20px 20px;
+  border: 1px solid var(--color-border);
+  border-radius: 16px; /* composer-card's card radius — NOT the Astryx scale */
+  background: var(--color-surface);
+}
+
+.settings-card--muted {
+  margin-top: 8px; /* groups the dev card away from the product cards above */
+  padding: 16px 20px 18px;
+  background: transparent;
+  border-style: dashed;
+}
+
+/* --- Row cards (#138: Codex-style one-setting-per-row) --- */
+
+/* Group title: plain text head of a card whose content is SettingsRows —
+ * the card icon chip is gone, the group title sets the rhythm. */
+.settings-group-title {
+  margin: 0 0 4px;
+  font-size: var(--panda-size-chrome);
+  font-weight: 600;
+}
+
+.settings-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 13px 0;
+}
+
+.settings-row + .settings-row {
+  border-top: 1px solid var(--color-border);
+}
+
+.settings-row-text {
+  flex: 1;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-row-title {
+  font-size: var(--panda-size-chrome);
+  font-weight: 500;
+}
+
+.settings-row-desc {
+  font-size: var(--panda-size-micro);
+  line-height: 1.5;
+  color: var(--color-muted);
+}
+
+.settings-row-control {
+  margin-inline-start: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+/* Read-only value on the right (version, host, UA…): quiet, no control. */
+.settings-row-value {
+  font-size: var(--panda-size-chrome);
+  color: var(--color-fg);
+}
+
+/* --- Appearance: font-size steppers (#171) --- */
+
+.settings-font-stepper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Fixed width so "10 px"↔"18 px" swaps never jitter the row. */
+.settings-font-value {
+  min-width: 5ch;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: var(--panda-size-chrome);
+  color: var(--color-fg);
+}
+
+.settings-card-desc {
+  margin: 0 0 14px;
+  font-size: var(--panda-size-chrome);
+  line-height: 1.55;
+  color: var(--color-muted);
+}
+
+/* --- Appearance: theme swatches --- */
+
+.settings-theme-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-theme-swatch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px 6px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--panda-radius-full);
+  background: var(--color-surface);
+  color: var(--color-fg);
+  font: inherit;
+  font-size: var(--panda-size-chrome);
+  font-weight: 500;
+  cursor: pointer;
+  transition: var(--panda-colors-transition);
+}
+
+.settings-theme-swatch:hover {
+  border-color: color-mix(in oklab, var(--color-accent) 55%, var(--color-border));
+}
+
+.settings-theme-swatch--active {
+  border-color: var(--color-accent);
+}
+
+/* The dot renders inside its own theme scope: `--color-accent` resolves to
+ * THAT theme's accent, so the swatch previews it without a color table. */
+.settings-theme-dot-scope {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+}
+
+.settings-theme-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--panda-radius-full);
+  background: var(--color-accent);
+  border: 1px solid color-mix(in oklab, var(--color-fg) 18%, transparent);
+}
+
+.settings-theme-check {
+  position: absolute;
+  color: #fff;
+  filter: drop-shadow(0 0 1.5px rgba(0, 0, 0, 0.6));
+  pointer-events: none;
+}
+
+.settings-theme-more {
+  font-size: var(--panda-size-micro);
+  color: var(--color-muted);
+}
+
+/* --- Agent 配置 rows --- */
+
+.settings-profile-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-profile-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 10px;
+  border-radius: var(--panda-radius-lg);
+  transition: var(--panda-colors-transition);
+}
+
+/* Hairline between list rows — the same row rhythm as SettingsRow cards,
+ * so every page of the settings reads with one beat (#138). */
+.settings-profile-row + .settings-profile-row {
+  border-top: 1px solid var(--color-border);
+}
+
+.settings-profile-row:hover {
+  background: color-mix(in oklab, var(--color-accent) 6%, transparent);
+}
+
+.settings-profile-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: var(--panda-radius-full);
+  background: color-mix(in oklab, var(--color-accent) 25%, transparent);
+  /* the tinted chip needs its own outline to read as a shape against the
+   * similarly warm card surface (chocolate-light findings) */
+  border: 1px solid color-mix(in oklab, var(--color-accent) 38%, transparent);
+  color: var(--color-accent);
+  font-size: var(--panda-size-chrome);
+  font-weight: 700;
+  user-select: none;
+}
+
+.settings-profile-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-profile-name {
+  font-size: var(--panda-size-chrome);
+  font-weight: 500;
+}
+
+.settings-profile-meta {
+  font-family: var(--font-mono);
+  font-size: var(--panda-size-micro);
+  color: var(--color-muted);
+}
+
+.settings-profile-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+/* Reveal-on-hover is a hover-pointer affordance, so the whole gate is scoped
+ * to devices that can hover. On touch, opacity:0 would leave the buttons
+ * invisible-but-clickable (opacity keeps hit testing) — a mis-tap trap with
+ * destructive actions here — so they stay permanently visible there. */
+@media (hover: hover) {
+  .settings-profile-actions {
+    opacity: 0;
+    transition: opacity 120ms ease;
+  }
+
+  .settings-profile-row:hover .settings-profile-actions,
+  .settings-profile-row:focus-within .settings-profile-actions {
+    opacity: 1;
+  }
+}
+
+/* --- Empty state --- */
+
+.settings-profile-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 26px 16px 18px;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--panda-radius-lg);
+  text-align: center;
+}
+
+.settings-profile-empty-icon {
+  color: var(--color-faint);
+  margin-bottom: 4px;
+}
+
+.settings-profile-empty-title {
+  margin: 0;
+  font-size: var(--panda-size-chrome);
+  font-weight: 600;
+}
+
+.settings-profile-empty-desc {
+  margin: 0 0 4px;
+  font-size: var(--panda-size-chrome);
+  color: var(--color-muted);
+}
+
+/* --- Inline create/edit form --- */
+
+.settings-profile-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--color-accent);
+  border-radius: var(--panda-radius-lg);
+  /* one step below the card: bg (body) reads as an inset well inside a
+   * surface card — surface-on-surface would have no contrast left (#111) */
+  background: var(--color-bg);
+}
+
+.settings-form-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.settings-form-kind {
+  flex-shrink: 0;
+}
+
+.settings-form-path {
+  flex: 1;
+  min-width: 0;
+}
+
+/* MCP whitelist picker inside the profile form (#148): a row-shaped checkbox
+ * list — name (checkbox) left, transport summary right, hairline between. */
+.settings-form-mcp {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-form-mcp-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-form-mcp-title {
+  font-size: var(--panda-size-chrome);
+  font-weight: 500;
+}
+
+.settings-form-mcp-desc {
+  font-size: var(--panda-size-micro);
+  color: var(--color-muted);
+}
+
+.settings-form-mcp-empty {
+  margin: 0;
+  font-size: var(--panda-size-micro);
+  color: var(--color-muted);
+}
+
+.settings-form-mcp-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings-form-mcp-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.settings-form-mcp-item + .settings-form-mcp-item {
+  border-top: 1px solid var(--color-border);
+}
+
+.settings-form-mcp-meta {
+  margin-inline-start: auto;
+  flex-shrink: 1;
+  max-width: 55%;
+  font-family: var(--font-mono);
+  font-size: var(--panda-size-micro);
+  color: var(--color-muted);
+}
+
+.settings-form-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* --- Post-create CTA (#221) --- */
+
+.settings-profile-saved {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 10px;
+  border-radius: var(--panda-radius-lg);
+  background: color-mix(in oklab, var(--color-accent) 6%, transparent);
+}
+
+.settings-profile-saved-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-profile-saved-title {
+  font-size: var(--panda-size-chrome);
+  color: var(--color-fg);
+}
+
+.settings-profile-saved-desc {
+  font-size: var(--panda-size-micro);
+  color: var(--color-muted);
+}
+
+.settings-profile-saved-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* --- 测试连接 verdict (#221) --- */
+
+.settings-test-result {
+  margin: 0;
+  font-size: var(--panda-size-micro);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-test-result--ok {
+  color: var(--color-accent);
+}
+
+.settings-test-result--fail {
+  color: var(--color-danger);
+}
+
+/* --- Colophon --- */
+
+.settings-colophon {
+  max-width: 720px;
+  margin: 4px auto 0;
+  padding: 0 20px;
+  font-size: var(--panda-size-micro);
+  color: var(--color-muted);
+  text-align: center;
+}

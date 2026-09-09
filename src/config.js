@@ -8,6 +8,7 @@ export const DEFAULT_CONFIG = Object.freeze({
   port: 0,
   openBrowser: true,
   pollIntervalMinutes: 15,
+  agentCommand: 'omp',
   gitlab: { baseUrl: null, token: null },
   repos: {},
 })

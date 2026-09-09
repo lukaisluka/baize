@@ -1,0 +1,102 @@
+import { describe, expect, it } from 'vitest';
+import {
+  mcpDraftErrors,
+  mcpServerSummary,
+  profileDraftErrors,
+  SETTINGS_SECTIONS,
+  type McpDraft,
+  type ProfileDraft,
+} from './SettingsPage';
+
+const draft = (patch: Partial<ProfileDraft> = {}): ProfileDraft => ({
+  name: 'test-agent',
+  type: 'websocket',
+  url: 'ws://localhost:8766/acp',
+  command: '',
+  args: '',
+  workspace: { kind: 'local-directory', path: '/tmp/project' },
+  mcpServerIds: [],
+  ...patch,
+});
+
+const mcpDraft = (patch: Partial<McpDraft> = {}): McpDraft => ({
+  name: 'filesystem',
+  type: 'stdio',
+  command: 'npx',
+  args: '-y server-filesystem',
+  url: '',
+  ...patch,
+});
+
+describe('SETTINGS_SECTIONS (#117: sidebar nav ↔ section pages)', () => {
+  it('lists the four product sections with unique ids (外观+语言 grouped into 通用)', () => {
+    expect(SETTINGS_SECTIONS.map((s) => s.id)).toEqual(['general', 'agents', 'mcp', 'diagnostics']);
+    expect(new Set(SETTINGS_SECTIONS.map((s) => s.id)).size).toBe(SETTINGS_SECTIONS.length);
+  });
+
+  it('every section names a title and a description (the page-header skeleton)', () => {
+    for (const section of SETTINGS_SECTIONS) {
+      expect(section.titleKey).toMatch(/^(\w+\.)+\w+$/);
+      expect(section.descKey).toMatch(/^(\w+\.)+\w+$/);
+    }
+  });
+});
+
+describe('profileDraftErrors', () => {
+  it('passes a complete draft', () => {
+    expect(profileDraftErrors(draft())).toEqual({});
+  });
+
+  it('flags blank name and url', () => {
+    expect(profileDraftErrors(draft({ name: '   ', url: '' }))).toEqual({
+      name: 'Profile name is required',
+      url: 'Endpoint is required',
+    });
+  });
+
+  it('requires a path only for local-directory workspaces (无工作区 needs none, ADR 0005)', () => {
+    expect(profileDraftErrors(draft({ workspace: { kind: 'none', path: '' } }))).toEqual({});
+    expect(profileDraftErrors(draft({ workspace: { kind: 'local-directory', path: ' ' } }))).toEqual({
+      path: 'A local directory needs a path',
+    });
+  });
+
+  it('stdio drafts need a command, not a url (#121)', () => {
+    expect(profileDraftErrors(draft({ type: 'stdio', command: 'node', args: 'agent.js', url: '' }))).toEqual({});
+    expect(profileDraftErrors(draft({ type: 'stdio', command: '   ' }))).toEqual({
+      command: 'stdio needs an executable command',
+    });
+  });
+});
+
+describe('mcpDraftErrors (issue #71)', () => {
+  it('passes a complete stdio draft', () => {
+    expect(mcpDraftErrors(mcpDraft())).toEqual({});
+  });
+
+  it('flags a blank name', () => {
+    expect(mcpDraftErrors(mcpDraft({ name: ' ' }))).toEqual({ name: 'Server name is required' });
+  });
+
+  it('stdio requires a command; args are optional', () => {
+    expect(mcpDraftErrors(mcpDraft({ command: '', args: '' }))).toEqual({ command: 'stdio type needs an executable command' });
+  });
+
+  it('http/sse require a url and not a command', () => {
+    expect(mcpDraftErrors(mcpDraft({ type: 'http', command: '', url: 'https://x/mcp' }))).toEqual({});
+    expect(mcpDraftErrors(mcpDraft({ type: 'sse', command: '', url: ' ' }))).toEqual({
+      url: 'A URL is required',
+    });
+  });
+});
+
+describe('mcpServerSummary (issue #71)', () => {
+  it('summarizes stdio with command and args, url transports with their url', () => {
+    expect(
+      mcpServerSummary({ id: 'a', name: 'fs', type: 'stdio', command: 'npx', args: '-y srv' }),
+    ).toBe('stdio · npx -y srv');
+    expect(mcpServerSummary({ id: 'a', name: 'fs', type: 'stdio', command: 'uvx', args: '  ' })).toBe('stdio · uvx');
+    expect(mcpServerSummary({ id: 'b', name: 'web', type: 'http', url: 'https://x/mcp' })).toBe('http · https://x/mcp');
+    expect(mcpServerSummary({ id: 'c', name: 'old', type: 'sse', url: 'https://y/sse' })).toBe('sse · https://y/sse');
+  });
+});

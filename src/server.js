@@ -1,7 +1,71 @@
 import { createServer } from 'node:http'
+import { createReadStream, existsSync, statSync } from 'node:fs'
+import { extname, join, resolve, sep } from 'node:path'
 
-// Placeholder until the Panda-derived SPA lands (#9), now with the repo/index
-// surface #8 needs. Self-contained: no external assets, vanilla JS only.
+const MIME_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+  '.map': 'application/json',
+  '.txt': 'text/plain; charset=utf-8',
+  '.webmanifest': 'application/manifest+json',
+  '.wasm': 'application/wasm',
+}
+
+// Static handler for the built SPA (ui/dist). Unknown paths fall back to
+// index.html so client-side routing works on deep links; /api/* and /fleet
+// are handled before this ever runs.
+function serveStatic(res, distDir, urlPath) {
+  const root = resolve(distDir)
+  const relative = urlPath === '/' ? 'index.html' : urlPath.slice(1)
+  const candidate = resolve(root, decodeURIComponent(relative))
+  // Prefix must include the separator, else a sibling dir (ui/dist-evil)
+  // would pass the check.
+  if (candidate !== root && !candidate.startsWith(root + sep)) {
+    return send(res, 403, '{"error":"forbidden"}\n', 'application/json')
+  }
+  let file = candidate
+  if (!existsSync(file) || statSync(file).isDirectory()) {
+    file = join(root, 'index.html')
+    if (!existsSync(file)) {
+      return send(res, 500, '{"error":"UI build missing"}\n', 'application/json')
+    }
+  }
+  const type = MIME_TYPES[extname(file)] ?? 'application/octet-stream'
+  res.writeHead(200, { 'content-type': type })
+  // The existsSync above can race a concurrent delete; an unhandled stream
+  // error would take down the whole server.
+  createReadStream(file).on('error', (err) => {
+    if (!res.headersSent) send(res, 500, '{"error":"read failed"}\n', 'application/json')
+    else res.end()
+  }).pipe(res)
+  return 200
+}
+
+const NO_BUILD_HTML = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>BaiZe</title></head>
+<body style="font:16px/1.6 system-ui;padding:3rem;">
+<p><strong>BaiZe server is running, but the UI has not been built.</strong></p>
+<p>Build it from the repository root: <code>npm run build:ui</code>, then restart baize.</p>
+<p>The fleet status page remains available at <a href="/fleet">/fleet</a>.</p>
+</body></html>
+`
+
+// Fleet status page (#8 surface) mounted at /fleet; the chat SPA from the
+// vendored Panda UI is served at /. Self-contained vanilla JS, no assets.
 const PLACEHOLDER_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -39,7 +103,7 @@ const PLACEHOLDER_HTML = `<!doctype html>
 <header>
   <h1>BaiZe</h1>
   <p>Local-first multi-repo code Q&amp;A.</p>
-  <p>Skeleton placeholder — the UI arrives with #9.</p>
+  <p>Fleet status — the chat UI lives at <a href="/">/</a>.</p>
 </header>
 <section>
   <form id="add-repo">
@@ -189,7 +253,9 @@ async function handleApi(req, res, path, { registry }) {
   return sendJson(res, 404, { error: 'not found' })
 }
 
-export function createBaizeServer({ logger, registry } = {}) {
+export function createBaizeServer({ logger, registry, uiDist } = {}) {
+  const spaAvailable = uiDist ? existsSync(join(uiDist, 'index.html')) : false
+
   return createServer(async (req, res) => {
     const path = req.url.split('?')[0]
     let status
@@ -197,8 +263,12 @@ export function createBaizeServer({ logger, registry } = {}) {
     try {
       if (path.startsWith('/api/')) {
         status = await handleApi(req, res, path, { registry })
-      } else if (req.method === 'GET' && (path === '/' || path === '/index.html')) {
+      } else if (req.method === 'GET' && (path === '/fleet' || path === '/fleet/')) {
         status = send(res, 200, PLACEHOLDER_HTML, 'text/html; charset=utf-8')
+      } else if (req.method === 'GET' && uiDist && spaAvailable) {
+        status = serveStatic(res, uiDist, path)
+      } else if (req.method === 'GET' && uiDist && !spaAvailable) {
+        status = send(res, 200, NO_BUILD_HTML, 'text/html; charset=utf-8')
       } else {
         status = sendJson(res, 404, { error: 'not found' })
       }

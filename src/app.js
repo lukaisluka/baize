@@ -5,16 +5,25 @@ import { close, createBaizeServer, listen } from './server.js'
 import { openBrowser } from './open-browser.js'
 import { CbmSupervisor } from './cbm.js'
 import { createRepoRegistry } from './repos.js'
+import { createAcpBridge } from './acp-bridge.js'
 
-// Composition root: data layout -> config -> logger -> CBM + repo registry ->
-// HTTP server -> browser. CBM is supervised but lazy — nothing spawns until
-// the first repo is submitted — and every stage logs so a failure anywhere is
-// traceable from ~/.baize/logs/baize.log.
+// The built SPA: BAIZE_UI_DIST overrides; otherwise ui/dist next to src/
+// (repo checkout) — the packed layout (dist/ui) arrives with publishing.
+function resolveUiDist(env = process.env) {
+  if (env.BAIZE_UI_DIST) return env.BAIZE_UI_DIST
+  return new URL('../ui/dist', import.meta.url).pathname
+}
+
+// Composition root: data layout -> config -> logger -> CBM + repo registry +
+// ACP bridge -> HTTP server -> browser. CBM is supervised but lazy; the ACP
+// bridge spawns one agent child per WebSocket connection and reaps them all
+// on shutdown. Every stage logs so a failure is traceable from baize.log.
 export async function startApp({
   home = resolveHome(),
   port,
   openBrowser: shouldOpen = true,
   stdout = process.stdout,
+  uiDist = resolveUiDist(),
 } = {}) {
   const dirs = ensureDataLayout(home)
   const config = loadConfig(home)
@@ -23,7 +32,14 @@ export async function startApp({
   const cbm = new CbmSupervisor({ cacheDir: dirs.index, logger })
   const registry = createRepoRegistry({ config, save: () => saveConfig(home, config), logger, cbm })
 
-  const server = createBaizeServer({ logger, registry })
+  const server = createBaizeServer({ logger, registry, uiDist })
+  const bridge = createAcpBridge({
+    server,
+    home,
+    agentCommand: config.agentCommand ?? 'omp',
+    logger,
+  })
+
   const bound = await listen(server, { port: port ?? config.port })
   const url = `http://${bound.host}:${bound.port}`
 
@@ -41,10 +57,12 @@ export async function startApp({
     server,
     cbm,
     registry,
+    bridge,
     async stop() {
       logger.info('shutting down')
       await close(server)
-      // Server first (no new CBM calls), then the CBM child + its daemon.
+      // Server first (no new connections/calls), then agent children, then CBM.
+      await bridge.stop()
       await cbm.stop()
     },
   }

@@ -1,0 +1,145 @@
+/* NewSessionDialog (IA refactor phase 3): agent picker + custom-address
+ * form inside an Astryx Dialog. Tokens mirror SettingsPage. */
+
+.nsd-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.nsd-hint {
+  margin: 0;
+  font-size: var(--panda-size-chrome);
+  line-height: 1.5;
+  color: var(--color-muted);
+}
+
+.nsd-agent {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--panda-radius-lg);
+  background: var(--color-raised);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.nsd-agent:hover {
+  border-color: var(--color-accent);
+}
+
+/* Bug hunt #3: a mid-turn agent is a dead end for session/new — visibly
+ * disabled instead of a click that does nothing. */
+.nsd-agent:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.nsd-agent:disabled:hover {
+  border-color: var(--color-border);
+}
+
+/* The settings page's post-create CTA deep-links here (#221): the fresh
+ * profile's row wears a one-time accent ring so「预选」reads at a glance. */
+.nsd-agent--suggested {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px var(--color-accent);
+}
+
+.nsd-agent-status {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.nsd-agent-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.nsd-agent-name {
+  font-size: var(--panda-size-chrome);
+  font-weight: 500;
+}
+
+.nsd-agent-meta {
+  font-size: var(--panda-size-micro);
+  color: var(--color-muted);
+}
+
+.nsd-agent-chevron {
+  flex-shrink: 0;
+  color: var(--color-faint);
+}
+
+.nsd-custom {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border);
+}
+
+.nsd-custom-title {
+  font-size: var(--panda-size-chrome);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--color-muted);
+}
+
+/* #157: with configured agents the custom form is an advanced aside —
+ * one quiet header row that expands it. Same typographic rung as
+ * .nsd-custom-title so the folded and agentless states read as one section. */
+.nsd-custom-toggle {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  border: none;
+  background: none;
+  color: var(--color-muted);
+  font: inherit;
+  font-size: var(--panda-size-chrome);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  text-align: left;
+}
+.nsd-custom-toggle:hover {
+  color: var(--color-fg);
+}
+
+.nsd-custom-toggle-chevron {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--color-faint);
+  transition: transform 150ms var(--panda-ease);
+}
+.nsd-custom-toggle-chevron--open {
+  transform: rotate(180deg);
+}
+
+.nsd-custom-fields {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.nsd-custom-kind {
+  flex-shrink: 0;
+}
+
+.nsd-custom-path {
+  flex: 1;
+  min-width: 0;
+}

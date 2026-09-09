@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { request } from 'node:http'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 import { createLogger } from '../src/logger.js'
@@ -16,11 +16,23 @@ const registry = {
   ],
   add: () => ({ name: 'new', path: '/x/new' }),
 }
-const server = createBaizeServer({ logger, registry })
+
+// Fake SPA dist for static-serving tests.
+const distDir = join(home, 'ui-dist')
+mkdirSync(join(distDir, 'assets'), { recursive: true })
+writeFileSync(join(distDir, 'index.html'), '<!doctype html><title>baize spa</title>')
+writeFileSync(join(distDir, 'assets', 'app.js'), 'console.log("spa")')
+
+const server = createBaizeServer({ logger, registry, uiDist: distDir })
+const noDistServer = createBaizeServer({ logger, registry, uiDist: join(home, 'no-dist') })
 const bound = await listen(server, { port: 0 })
+const noDistBound = await listen(noDistServer, { port: 0 })
 const base = `http://${bound.host}:${bound.port}`
+const noDistBase = `http://${noDistBound.host}:${noDistBound.port}`
 after(async () => {
   await close(server)
+  await close(noDistServer)
+  rmSync(distDir, { recursive: true, force: true })
   cleanupHome(home)
 })
 
@@ -29,12 +41,40 @@ test('binds 127.0.0.1 only, on a chosen free port', () => {
   assert.ok(bound.port > 0)
 })
 
-test('GET / serves the placeholder page', async () => {
+test('GET / serves the built SPA index', async () => {
   const res = await fetch(base)
   assert.equal(res.status, 200)
   assert.match(res.headers.get('content-type'), /text\/html/)
-  const html = await res.text()
-  assert.match(html, /BaiZe/)
+  assert.match(await res.text(), /baize spa/)
+})
+
+test('deep links fall back to the SPA index (client-side routing)', async () => {
+  const res = await fetch(new URL('/session/abc', base))
+  assert.equal(res.status, 200)
+  assert.match(await res.text(), /baize spa/)
+})
+
+test('SPA assets are served with correct content types', async () => {
+  const res = await fetch(new URL('/assets/app.js', base))
+  assert.equal(res.status, 200)
+  assert.match(res.headers.get('content-type'), /text\/javascript/)
+})
+
+test('path traversal outside the dist dir is refused', async () => {
+  const res = await fetch(new URL('/..%2f..%2fconfig.json', base))
+  assert.equal(res.status, 403)
+})
+
+test('when the SPA is not built, / explains the remedy', async () => {
+  const res = await fetch(noDistBase)
+  assert.equal(res.status, 200)
+  assert.match(await res.text(), /npm run build:ui/)
+})
+
+test('GET /fleet serves the fleet status page', async () => {
+  const res = await fetch(new URL('/fleet', base))
+  assert.equal(res.status, 200)
+  assert.match(await res.text(), /BaiZe/)
 })
 
 test('GET /api/health reports ok', async () => {
@@ -108,10 +148,14 @@ test('API requests with a non-local Host header are rejected (DNS-rebinding guar
   assert.equal(status, 403)
 })
 
-test('unknown paths get a JSON 404', async () => {
-  const res = await fetch(new URL('/nope', base))
-  assert.equal(res.status, 404)
-  assert.match(res.headers.get('content-type'), /application\/json/)
+test('unknown /api paths and non-GET unknown paths get a JSON 404', async () => {
+  const api = await fetch(new URL('/api/nope', base))
+  assert.equal(api.status, 404)
+  assert.match(api.headers.get('content-type'), /application\/json/)
+
+  const post = await fetch(new URL('/nope', base), { method: 'POST' })
+  assert.equal(post.status, 404)
+  assert.match(post.headers.get('content-type'), /application\/json/)
 })
 
 test('requests are trace-logged to baize.log', async () => {

@@ -1,0 +1,251 @@
+import { describe, expect, it } from 'vitest';
+import {
+  connectionLifecycle,
+  connectionPhase,
+  foregroundLifecycle,
+  isLinkUp,
+  mainView,
+  type ForegroundLifecycleInput,
+  type MainView,
+} from './connectionLifecycle';
+import type { ConnectionInfo, ConnectionState } from '../store';
+
+// -- connectionPhase: the total precedence -------------------------------------
+
+describe('connectionPhase', () => {
+  it('maps each raw status to its phase', () => {
+    expect(connectionPhase('connecting', null, false)).toBe('connecting');
+    expect(connectionPhase('error', 'boom', false)).toBe('error');
+    expect(connectionPhase('auth_required', null, false)).toBe('auth-required');
+    expect(connectionPhase('disconnected', null, false)).toBe('disconnected');
+    expect(connectionPhase('connected', null, false)).toBe('connected');
+  });
+
+  it('splits the connected status by side facts, switch first', () => {
+    expect(connectionPhase('connected', null, true)).toBe('switching-session');
+    expect(connectionPhase('connected', '上次切换失败', false)).toBe('connected-degraded');
+    // A switch in flight outranks a non-fatal error (StatusBar precedence).
+    expect(connectionPhase('connected', 'boom', true)).toBe('switching-session');
+  });
+
+  it('keeps the link up across the three connected phases only', () => {
+    expect(isLinkUp('connected')).toBe(true);
+    expect(isLinkUp('connected-degraded')).toBe(true);
+    expect(isLinkUp('switching-session')).toBe(true);
+    expect(isLinkUp('connecting')).toBe(false);
+    expect(isLinkUp('error')).toBe(false);
+    expect(isLinkUp('auth-required')).toBe(false);
+    expect(isLinkUp('disconnected')).toBe(false);
+  });
+});
+
+// -- connectionLifecycle: per-slot facts + 需要关注 reasons ----------------------
+
+function slot(overrides: Partial<ConnectionState> = {}): ConnectionState {
+  return {
+    connection: { status: 'connected', error: null } as ConnectionInfo,
+    capabilities: {} as ConnectionState['capabilities'],
+    sessions: [],
+    docs: {},
+    switching: null,
+    unreadCompletion: false,
+    lastActivityAt: null,
+    ...overrides,
+  };
+}
+
+describe('connectionLifecycle', () => {
+  it('aggregates running and busy across the slot, not just the foreground doc', () => {
+    const idle = slot();
+    expect(connectionLifecycle(idle).running).toBe(false);
+    expect(connectionLifecycle(idle).busy).toBe(false);
+  });
+
+  it('carries phase and error through', () => {
+    const failed = slot({ connection: { status: 'error', error: 'boom' } as ConnectionState['connection'] });
+    const projected = connectionLifecycle(failed);
+    expect(projected.phase).toBe('error');
+    expect(projected.error).toBe('boom');
+  });
+
+  it('lists each 需要关注 source that actually fired, instead of folding to a boolean', () => {
+    expect(connectionLifecycle(slot()).attention).toEqual([]);
+
+    expect(connectionLifecycle(slot({ unreadCompletion: true })).attention).toEqual(['unread-completion']);
+
+    const pending = slot({ docs: { s1: { permissions: { p1: { status: 'pending' } } } } as unknown as ConnectionState['docs'] });
+    expect(connectionLifecycle(pending).attention).toEqual(['pending-permission']);
+
+    const broken = slot({ connection: { status: 'error', error: 'boom' } as ConnectionState['connection'] });
+    expect(connectionLifecycle(broken).attention).toEqual(['connection-error']);
+
+    const auth = slot({ connection: { status: 'auth_required', error: null } as ConnectionState['connection'] });
+    expect(connectionLifecycle(auth).attention).toEqual(['auth-required']);
+
+    // Multiple sources ride along together.
+    const several = slot({
+      unreadCompletion: true,
+      connection: { status: 'error', error: 'boom' } as ConnectionState['connection'],
+    });
+    expect(connectionLifecycle(several).attention).toEqual(['unread-completion', 'connection-error']);
+  });
+});
+
+// -- foregroundLifecycle: composer gates + hint ---------------------------------
+
+function foreground(overrides: Partial<ForegroundLifecycleInput>): ForegroundLifecycleInput {
+  return {
+    mode: 'live',
+    docStatus: 'idle',
+    connection: { status: 'connected', error: null },
+    switching: false,
+    ...overrides,
+  };
+}
+
+describe('foregroundLifecycle (demo replay)', () => {
+  it('asks for approval while a permission is pending', () => {
+    expect(foregroundLifecycle(foreground({ mode: 'demo', docStatus: 'requires_action' })).hint).toBe(
+      'Awaiting your approval — respond in the message stream',
+    );
+  });
+
+  it('announces work while the turn runs', () => {
+    expect(foregroundLifecycle(foreground({ mode: 'demo', docStatus: 'running' })).hint).toBe('Panda is working…');
+  });
+
+  it('stays empty when idle', () => {
+    expect(foregroundLifecycle(foreground({ mode: 'demo', docStatus: 'idle' })).hint).toBeUndefined();
+  });
+
+  it('never gates the composer on the connection, only on the turn', () => {
+    const demo = foregroundLifecycle(foreground({ mode: 'demo', docStatus: 'running' }));
+    expect(demo.composerDisabled).toBe(true);
+    expect(demo.busy).toBe(true);
+  });
+});
+
+describe('foregroundLifecycle (live connection)', () => {
+  it('leads with connection progress and failures before session state', () => {
+    expect(foregroundLifecycle(foreground({ connection: { status: 'connecting', error: null } })).hint).toBe('Connecting…');
+    expect(foregroundLifecycle(foreground({ connection: { status: 'error', error: 'boom' } })).hint).toBe(
+      'Connection failed — reconnect & resume from the sidebar, or connect again',
+    );
+  });
+
+  it('tells the user to connect when no session is possible', () => {
+    expect(foregroundLifecycle(foreground({ connection: { status: 'disconnected', error: null } })).hint).toBe(
+      'Not connected to an ACP service — connect from the sidebar',
+    );
+  });
+
+  it('surfaces an in-flight session switch', () => {
+    expect(foregroundLifecycle(foreground({ switching: true })).hint).toBe('Switching session…');
+  });
+
+  it('surfaces a non-fatal connection error on an otherwise healthy link', () => {
+    expect(foregroundLifecycle(foreground({ connection: { status: 'connected', error: '上次切换失败' } })).hint).toBe(
+      '上次切换失败',
+    );
+  });
+
+  it('announces work for running turns, but awaiting-approval points at the stream (#216)', () => {
+    expect(foregroundLifecycle(foreground({ docStatus: 'running' })).hint).toBe('Panda is working…');
+    expect(foregroundLifecycle(foreground({ docStatus: 'requires_action' })).hint).toBe(
+      'Awaiting your approval — respond in the message stream',
+    );
+  });
+
+  it('stays empty when connected and idle', () => {
+    expect(foregroundLifecycle(foreground({})).hint).toBeUndefined();
+  });
+
+  it('keeps the field writable only while a permission awaits on a healthy link (#216)', () => {
+    // Awaiting approval: send held back, drafting allowed.
+    const awaiting = foregroundLifecycle(foreground({ docStatus: 'requires_action' }));
+    expect(awaiting.composerDisabled).toBe(true);
+    expect(awaiting.composerInputLocked).toBe(false);
+    // Running / switching / broken link: field locked together with send.
+    expect(foregroundLifecycle(foreground({ docStatus: 'running' })).composerInputLocked).toBe(true);
+    expect(foregroundLifecycle(foreground({ switching: true })).composerInputLocked).toBe(true);
+    expect(
+      foregroundLifecycle(foreground({ docStatus: 'requires_action', connection: { status: 'disconnected', error: null } })).composerInputLocked,
+    ).toBe(true);
+    // Demo replays draft the same way while their permission waits.
+    expect(foregroundLifecycle(foreground({ mode: 'demo', docStatus: 'requires_action' })).composerInputLocked).toBe(false);
+  });
+
+  it('gates the composer on the link, the turn and in-flight switches', () => {
+    expect(foregroundLifecycle(foreground({})).composerDisabled).toBe(false);
+    expect(foregroundLifecycle(foreground({ connection: { status: 'disconnected', error: null } })).composerDisabled).toBe(true);
+    expect(foregroundLifecycle(foreground({ connection: { status: 'connecting', error: null } })).composerDisabled).toBe(true);
+    // A non-fatal error keeps the link usable.
+    expect(foregroundLifecycle(foreground({ connection: { status: 'connected', error: '上次切换失败' } })).composerDisabled).toBe(false);
+    expect(foregroundLifecycle(foreground({ docStatus: 'running' })).composerDisabled).toBe(true);
+    expect(foregroundLifecycle(foreground({ switching: true })).composerDisabled).toBe(true);
+  });
+
+  it('offers stop only while a turn runs on a healthy live link', () => {
+    expect(foregroundLifecycle(foreground({ docStatus: 'running' })).canStop).toBe(true);
+    expect(foregroundLifecycle(foreground({ docStatus: 'idle' })).canStop).toBe(false);
+    expect(foregroundLifecycle(foreground({ docStatus: 'running', connection: { status: 'error', error: 'boom' } })).canStop).toBe(false);
+    expect(foregroundLifecycle(foreground({ mode: 'demo', docStatus: 'running' })).canStop).toBe(false);
+  });
+
+  it('keeps the foreground busy through turns and switches', () => {
+    expect(foregroundLifecycle(foreground({ docStatus: 'requires_action' })).busy).toBe(true);
+    expect(foregroundLifecycle(foreground({ switching: true })).busy).toBe(true);
+    expect(foregroundLifecycle(foreground({})).busy).toBe(false);
+  });
+});
+
+// -- mainView: content column ownership (#200 onboarding, #218 offline) --------
+
+type MainViewInput = Parameters<typeof mainView>[0];
+
+function view(overrides: Partial<MainViewInput> = {}): MainView {
+  return mainView({
+    mode: 'live',
+    phase: 'connected',
+    authElicitation: null,
+    activeSessionId: 's-1',
+    ...overrides,
+  });
+}
+
+describe('mainView (断连后留存文档可读, #218)', () => {
+  it('a live foreground with a session renders the stream', () => {
+    expect(view()).toBe('message-stream');
+  });
+
+  it('a clean disconnect keeps the stream while the pointer sits on a retained document — onboarding must not take over', () => {
+    // The regression: the anchor (connection.sessionId) is null after a clean
+    // disconnect; the onboarding gate keyed on it swallowed the transcript.
+    expect(view({ phase: 'disconnected', activeSessionId: 's-1' })).toBe('message-stream');
+  });
+
+  it('offline with no pointer shows onboarding (fresh app, seeded slot, offline switch to a doc-less session)', () => {
+    expect(view({ phase: 'disconnected', activeSessionId: null })).toBe('onboarding');
+  });
+
+  it('a first connect in flight passes through onboarding until a session is adopted', () => {
+    expect(view({ phase: 'connecting', activeSessionId: null })).toBe('onboarding');
+  });
+
+  it('an error disconnect keeps the stream (its anchor and pointer are retained)', () => {
+    expect(view({ phase: 'error' })).toBe('message-stream');
+  });
+
+  it('the auth gate owns the view ahead of onboarding, even without a pointer', () => {
+    expect(view({ phase: 'auth-required', activeSessionId: null })).toBe('auth-gate');
+    expect(
+      view({
+        authElicitation: { mode: 'form', id: 'e-1', toolCallId: null, title: 'Login', description: null, fields: [] },
+      }),
+    ).toBe('auth-gate');
+  });
+
+  it('the demo replay owns the stream unconditionally — no auth gate, no onboarding', () => {
+    expect(view({ mode: 'demo', phase: 'auth-required', activeSessionId: null })).toBe('message-stream');
+  });
+});

@@ -1,0 +1,196 @@
+import type { HighlighterCore } from 'shiki/core';
+
+/**
+ * Fine-grained shiki integration: core only + the JavaScript regex engine,
+ * theme and languages lazy-loaded as async chunks on first use. Highlighting
+ * is cosmetic — any failure degrades to plain rendering but is logged so the
+ * next occurrence stays diagnosable.
+ */
+
+export type TokenSpan = { value: string; color?: string };
+
+/* Paired vitesse themes: one tokenize pass yields both variants, rendered as
+ * CSS native light-dark(light, dark). The <Theme> root's color-scheme drives
+ * the flip — same mechanism as every Astryx token, no JS mode awareness and
+ * no mode in the cache key (#40). */
+const THEMES = { light: 'vitesse-light', dark: 'vitesse-dark' };
+
+/** Markdown fence tag → shiki language id; unmapped tags render unhighlighted. */
+const LANG_ALIASES: Record<string, string> = {
+  js: 'javascript', mjs: 'javascript', cjs: 'javascript',
+  ts: 'typescript', mts: 'typescript', cts: 'typescript',
+  py: 'python', rb: 'ruby', rs: 'rust', golang: 'go',
+  sh: 'bash', shell: 'bash', zsh: 'bash',
+  yml: 'yaml', md: 'markdown', 'c++': 'cpp', h: 'c',
+  cs: 'csharp', kt: 'kotlin',
+};
+
+/** Per-language async imports; the set we are willing to bundle as chunks. */
+const LANG_IMPORTS: Record<string, () => Promise<unknown>> = {
+  typescript: () => import('shiki/langs/typescript.mjs'),
+  tsx: () => import('shiki/langs/tsx.mjs'),
+  javascript: () => import('shiki/langs/javascript.mjs'),
+  jsx: () => import('shiki/langs/jsx.mjs'),
+  json: () => import('shiki/langs/json.mjs'),
+  python: () => import('shiki/langs/python.mjs'),
+  rust: () => import('shiki/langs/rust.mjs'),
+  go: () => import('shiki/langs/go.mjs'),
+  java: () => import('shiki/langs/java.mjs'),
+  ruby: () => import('shiki/langs/ruby.mjs'),
+  php: () => import('shiki/langs/php.mjs'),
+  c: () => import('shiki/langs/c.mjs'),
+  cpp: () => import('shiki/langs/cpp.mjs'),
+  csharp: () => import('shiki/langs/csharp.mjs'),
+  swift: () => import('shiki/langs/swift.mjs'),
+  kotlin: () => import('shiki/langs/kotlin.mjs'),
+  css: () => import('shiki/langs/css.mjs'),
+  scss: () => import('shiki/langs/scss.mjs'),
+  less: () => import('shiki/langs/less.mjs'),
+  html: () => import('shiki/langs/html.mjs'),
+  vue: () => import('shiki/langs/vue.mjs'),
+  svelte: () => import('shiki/langs/svelte.mjs'),
+  markdown: () => import('shiki/langs/markdown.mjs'),
+  yaml: () => import('shiki/langs/yaml.mjs'),
+  toml: () => import('shiki/langs/toml.mjs'),
+  bash: () => import('shiki/langs/bash.mjs'),
+  fish: () => import('shiki/langs/fish.mjs'),
+  sql: () => import('shiki/langs/sql.mjs'),
+  xml: () => import('shiki/langs/xml.mjs'),
+  graphql: () => import('shiki/langs/graphql.mjs'),
+  dart: () => import('shiki/langs/dart.mjs'),
+  scala: () => import('shiki/langs/scala.mjs'),
+  lua: () => import('shiki/langs/lua.mjs'),
+};
+
+/** File extension → shiki language id; unmapped extensions render unhighlighted. */
+const LANG_BY_EXT: Record<string, string> = {
+  ts: 'typescript', tsx: 'tsx', mts: 'typescript', cts: 'typescript',
+  js: 'javascript', jsx: 'jsx', mjs: 'javascript', cjs: 'javascript',
+  json: 'json', jsonc: 'json',
+  py: 'python', pyi: 'python',
+  rs: 'rust', go: 'go', java: 'java', rb: 'ruby', php: 'php',
+  c: 'c', h: 'c', cpp: 'cpp', hpp: 'cpp', cc: 'cpp', cxx: 'cpp',
+  cs: 'csharp', swift: 'swift', kt: 'kotlin',
+  css: 'css', scss: 'scss', less: 'less',
+  html: 'html', htm: 'html', vue: 'vue', svelte: 'svelte',
+  md: 'markdown', markdown: 'markdown',
+  yml: 'yaml', yaml: 'yaml', toml: 'toml',
+  sh: 'bash', bash: 'bash', zsh: 'bash', fish: 'fish',
+  sql: 'sql', xml: 'xml', graphql: 'graphql', gql: 'graphql',
+  dart: 'dart', scala: 'scala', lua: 'lua',
+};
+
+let highlighterPromise: Promise<HighlighterCore> | null = null;
+const loadedLangs = new Set<string>();
+const cache = new Map<string, TokenSpan[][]>();
+const CACHE_LIMIT = 64;
+
+/**
+ * 大输入降级阈值(#10):tokenize 在主线程同步执行,3000 行 TS 实测冷
+ * 2613ms——整个 app 无响应。超过任一阈值不再 tokenize,纯文本渲染
+ * (信息无损,只丢颜色)。600 行/30K 字符把最坏冷冻结压在 ~0.5s 内,
+ * 常见代码块(fence/整文件 diff 的绝大多数)远低于此不受影响。
+ */
+const MAX_LINES = 600;
+const MAX_CHARS = 30_000;
+const warnedOversized = new Set<string>();
+
+/** True when the code is too big to tokenize on the main thread (#10). */
+export function oversizedForHighlight(code: string): boolean {
+  return code.split('\n').length > MAX_LINES || code.length > MAX_CHARS;
+}
+
+function getHighlighter(): Promise<HighlighterCore> {
+  highlighterPromise ??= (async () => {
+    const [{ createHighlighterCore }, { createJavaScriptRegexEngine }] = await Promise.all([
+      import('shiki/core'),
+      import('shiki/engine/javascript'),
+    ]);
+    return createHighlighterCore({
+      themes: [import('shiki/themes/vitesse-light.mjs'), import('shiki/themes/vitesse-dark.mjs')],
+      langs: [],
+      engine: createJavaScriptRegexEngine(),
+    });
+  })();
+  return highlighterPromise;
+}
+
+/**
+ * Highlights `code` (whole file) into one TokenSpan[] per line, or null when
+ * the language is unknown, the code is empty, or highlighting fails.
+ */
+export async function highlightLines(path: string, code: string): Promise<TokenSpan[][] | null> {
+  const ext = path.split('.').pop()?.toLowerCase() ?? '';
+  const lang = LANG_BY_EXT[ext];
+  return lang ? highlightWithLang(lang, code) : null;
+}
+
+/**
+ * Highlights a markdown fenced code block addressed by its info-string tag
+ * (e.g. `ts` from ```ts). Same cache and lazy language loading as diffs.
+ */
+export async function highlightCode(fenceLang: string, code: string): Promise<TokenSpan[][] | null> {
+  const tag = fenceLang.toLowerCase();
+  return highlightWithLang(LANG_ALIASES[tag] ?? tag, code);
+}
+
+async function highlightWithLang(lang: string, code: string): Promise<TokenSpan[][] | null> {
+  const importLang = LANG_IMPORTS[lang];
+  if (!importLang || code === '') return null;
+
+  // #10: an unbounded synchronous tokenize freezes the UI for seconds —
+  // oversized input degrades to plain text. The warning fires once per
+  // language: every occurrence would spam streaming re-renders, once keeps
+  // the degradation diagnosable.
+  if (oversizedForHighlight(code)) {
+    if (!warnedOversized.has(lang)) {
+      warnedOversized.add(lang);
+      console.warn(
+        `[panda/highlight] ${lang} input over the degrade threshold (${code.split('\n').length} lines / ${code.length} chars) — rendering unhighlighted (#10)`,
+      );
+    }
+    return null;
+  }
+
+  const cacheKey = `${lang}\u0000${code}`;
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const highlighter = await getHighlighter();
+    if (!loadedLangs.has(lang)) {
+      await highlighter.loadLanguage((await importLang()) as Parameters<
+        HighlighterCore['loadLanguage']
+      >[0]);
+      loadedLangs.add(lang);
+    }
+    // The core API types pin `lang` to the bundle's known ids; ours arrive as
+    // runtime strings from the LANG_* tables (the same ids) — one narrowing
+    // cast keeps those tables string-keyed. Returns the bare token array
+    // (unlike codeToTokens, which wraps in { tokens }).
+    type KnownLang = Parameters<HighlighterCore['codeToTokensWithThemes']>[1]['lang'];
+    const tokens = highlighter.codeToTokensWithThemes(code, {
+      lang: lang as KnownLang,
+      themes: THEMES,
+    });
+    const lines = tokens.map((line) =>
+      line.map(({ content, variants }) => {
+        const light = variants.light?.color;
+        const dark = variants.dark?.color;
+        // Both variants normally carry a color; a missing one degrades to the
+        // single remaining value rather than dropping highlight entirely.
+        const color = light && dark ? `light-dark(${light}, ${dark})` : light ?? dark;
+        return { value: content, color };
+      }),
+    );
+    if (cache.size >= CACHE_LIMIT) {
+      const oldest = cache.keys().next();
+      if (!oldest.done && oldest.value !== undefined) cache.delete(oldest.value);
+    }
+    cache.set(cacheKey, lines);
+    return lines;
+  } catch (err) {
+    console.error(`[panda/highlight] failed to highlight as ${lang}`, err);
+    return null;
+  }
+}

@@ -1,0 +1,78 @@
+import { StrictMode, useEffect, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import { Theme } from '@astryxdesign/core/theme';
+import './index.css';
+import App from './App';
+import { AstryxSmoke } from './dev/AstryxSmoke';
+import { CrashProbe } from './dev/CrashProbe';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { installConsoleTap } from './diagnostics';
+import { loadThemeId, resolveTheme, subscribeTheme } from './theme';
+import { applyFontSize, loadFontSizePair } from './fontSize';
+import { I18nProvider } from './i18n/context';
+import { parseDevPage } from './routes';
+
+// Earliest possible (#105): the ring must catch startup errors too.
+installConsoleTap();
+
+// Font knobs pre-paint (#171): inline custom properties on <html> beat every
+// stylesheet layer, so the first frame already carries the stored sizes (no
+// 14→16 flash). Dev pages render without ThemeRoot — module scope is the only
+// spot that covers them too.
+applyFontSize(loadFontSizePair());
+
+// Desktop host boot (#125): the dynamic import keeps this module (and
+// @tauri-apps/api with it) out of the browser bundle — the chunk only loads
+// inside the Tauri shell, where it registers the stdio transport factory.
+if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+  void import('./desktop/boot').then((m) => m.bootDesktop());
+}
+
+const root = createRoot(document.getElementById('root')!);
+
+/** Runtime theme switch (#32 Phase 4): storage is the single source of truth
+ * (same contract as profiles.ts) — the sidebar picker saves, this anchor and
+ * the picker both re-render off the subscription. Built theme CSS ships in
+ * index.css for all seven; <Theme> only anchors data-astryx-theme and the
+ * color-scheme mode (gothic has no light tokens — forced dark). */
+function ThemeRoot() {
+  const [themeId, setThemeId] = useState(loadThemeId);
+  useEffect(() => subscribeTheme(setThemeId), []);
+  const choice = resolveTheme(themeId);
+  return (
+    <Theme theme={choice.theme} mode={choice.darkOnly ? 'dark' : 'system'}>
+      <I18nProvider>
+        <App />
+      </I18nProvider>
+    </Theme>
+  );
+}
+
+// Dev-only tree-level pages: parseDevPage (routes.ts) owns every hash
+// spelling — a tree-level page replaces the whole render root, while
+// in-app views (#/, #/settings) route inside App. #/crash mounts inside the
+// boundary on purpose: the page you should see is the crash fallback.
+const devPage = parseDevPage(window.location.hash);
+if (devPage === 'astryx-smoke') {
+  root.render(
+    <StrictMode>
+      <AstryxSmoke />
+    </StrictMode>,
+  );
+} else if (devPage === 'crash') {
+  root.render(
+    <StrictMode>
+      <ErrorBoundary>
+        <CrashProbe />
+      </ErrorBoundary>
+    </StrictMode>,
+  );
+} else {
+  root.render(
+    <StrictMode>
+      <ErrorBoundary>
+        <ThemeRoot />
+      </ErrorBoundary>
+    </StrictMode>,
+  );
+}

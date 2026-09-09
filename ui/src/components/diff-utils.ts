@@ -1,0 +1,276 @@
+import { diffLines, diffWordsWithSpace } from 'diff';
+
+/**
+ * Pure diff geometry: line rows, del↔add pairing and word-level segmentation.
+ * No React, no highlighting — fully unit-testable.
+ */
+
+/** Line-level additions/deletions between two full texts (ACP sends whole files). */
+export function diffStats(oldText: string | null, newText: string): {
+  additions: number;
+  deletions: number;
+} {
+  let additions = 0;
+  let deletions = 0;
+  for (const change of diffLines(oldText ?? '', newText)) {
+    const lineCount = change.value.replace(/\n$/, '').split('\n').length;
+    if (change.added) additions += lineCount;
+    else if (change.removed) deletions += lineCount;
+  }
+  return { additions, deletions };
+}
+
+export type DiffRowType = 'ctx' | 'add' | 'del';
+
+/** Word-level segmentation for paired del/add rows; changed = differing span. */
+export type WordSpan = { value: string; changed: boolean };
+
+export type DiffRow = {
+  type: DiffRowType;
+  oldNo: number | null;
+  newNo: number | null;
+  text: string;
+  /** Present only on rows paired with their counterpart across del/add runs. */
+  words?: WordSpan[];
+};
+
+/** Unified row list with dual line numbers, in arrival order. */
+export function computeRows(oldText: string, newText: string): DiffRow[] {
+  const rows: DiffRow[] = [];
+  let oldNo = 1;
+  let newNo = 1;
+  for (const change of diffLines(oldText, newText)) {
+    const lines = change.value.replace(/\n$/, '').split('\n');
+    for (const text of lines) {
+      if (change.added) rows.push({ type: 'add', oldNo: null, newNo: newNo++, text });
+      else if (change.removed) rows.push({ type: 'del', oldNo: oldNo++, newNo: null, text });
+      else rows.push({ type: 'ctx', oldNo: oldNo++, newNo: newNo++, text });
+    }
+  }
+  return rows;
+}
+
+/** 未变更段折叠占位(#88):rows 携带被折起的原始行,展开由渲染层决定。 */
+export type FoldSegment = { type: 'fold'; id: number; rows: DiffRow[] };
+export type RowSegment = DiffRow | FoldSegment;
+
+/**
+ * 大 diff 的未变更段折叠(#88):总行数不超过 threshold 时原样返回;超过
+ * 后每个变更行两侧保留 context 行 ctx(变更段 ±3 行不折),其余连续 ctx
+ * 段折为占位。不足 2 行的余段直接显示——占位行本身也占一行,折 1 行没有
+ * 收益。fold id 按出现顺序编号,输入不变则稳定,渲染层拿它记展开状态。
+ */
+export function foldRows(rows: DiffRow[], threshold = 15, context = 3): RowSegment[] {
+  if (rows.length <= threshold) return rows;
+  const kept = new Array<boolean>(rows.length).fill(false);
+  rows.forEach((row, i) => {
+    if (row.type === 'ctx') return;
+    for (let k = Math.max(0, i - context); k <= Math.min(rows.length - 1, i + context); k++) {
+      kept[k] = true;
+    }
+  });
+  const segments: RowSegment[] = [];
+  let foldId = 0;
+  for (let i = 0; i < rows.length; ) {
+    if (kept[i]) {
+      segments.push(rows[i]!);
+      i++;
+      continue;
+    }
+    let end = i;
+    while (end < rows.length && !kept[end]) end++;
+    if (end - i < 2) {
+      for (let k = i; k < end; k++) segments.push(rows[k]!);
+    } else {
+      segments.push({ type: 'fold', id: foldId++, rows: rows.slice(i, end) });
+    }
+    i = end;
+  }
+  return segments;
+}
+
+/**
+ * Standard unified patch (`git diff` format, #84):3 行上下文,相邻变更
+ * (间隔 ≤ 2×context 行 ctx)合入同一 hunk,可直接 `git apply`。行数据
+ * 复用 computeRows,两侧行号不会漂。空文本的行号起点是 0(新文件
+ * `-0,0`),与 git 行为一致。
+ *
+ * 无尾换行文件(#6):git 在 EOF 行缺尾换行时要求内容行后跟一行
+ * `\ No newline at end of file`,否则 `git apply` 拒收整个补丁。旧侧
+ * 尾行无换行标记跟在 del/ctx 行后,新侧跟在 add/ctx 行后;ctx 行两
+ * 侧同缺时(同一行内容)只标一次——与 git 产出一致。diffLines 把行
+ * 尾换行剥掉了,所以「是否尾行无换行」从原始文本重新判定。
+ */
+export function unifiedPatch(path: string, oldText: string, newText: string, context = 3): string {
+  const rows = computeRows(oldText, newText);
+  const hunks: DiffRow[][] = [];
+
+  const lastLineNo = (text: string): number | null =>
+    text === '' ? null : text.endsWith('\n') ? text.split('\n').length - 1 : text.split('\n').length;
+  const oldLast = lastLineNo(oldText);
+  const newLast = lastLineNo(newText);
+  const oldNoNewline = oldText !== '' && !oldText.endsWith('\n');
+  const newNoNewline = newText !== '' && !newText.endsWith('\n');
+  const NO_NEWLINE = '\\ No newline at end of file';
+
+  let i = 0;
+  while (i < rows.length) {
+    if (rows[i]!.type === 'ctx') {
+      i++;
+      continue;
+    }
+    const first = Math.max(0, i - context);
+    // lastChange 只记最后一个变更行——桥接 ctx 段时不推进它,否则尾部
+    // 上下文会超过 context 行(能 apply 但与 git 产出不一致)
+    let lastChange = i;
+    let scan = i + 1;
+    while (scan < rows.length) {
+      if (rows[scan]!.type !== 'ctx') {
+        lastChange = scan;
+        scan++;
+        continue;
+      }
+      let ctxRun = 0;
+      while (scan + ctxRun < rows.length && rows[scan + ctxRun]!.type === 'ctx') ctxRun++;
+      if (ctxRun > context * 2) break;
+      scan += ctxRun;
+    }
+    const end = Math.min(rows.length - 1, lastChange + context);
+    hunks.push(rows.slice(first, end + 1));
+    i = end + 1;
+  }
+
+  const lines: string[] = [`--- a/${path}`, `+++ b/${path}`];
+  for (const hunk of hunks) {
+    const oldStart = hunk.find((r) => r.oldNo !== null)?.oldNo ?? 0;
+    const newStart = hunk.find((r) => r.newNo !== null)?.newNo ?? 0;
+    const oldCount = hunk.filter((r) => r.type !== 'add').length;
+    const newCount = hunk.filter((r) => r.type !== 'del').length;
+    lines.push(`@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`);
+    for (const row of hunk) {
+      lines.push((row.type === 'add' ? '+' : row.type === 'del' ? '-' : ' ') + row.text);
+      const marksOldSide = oldNoNewline && (row.type === 'del' || row.type === 'ctx') && row.oldNo === oldLast;
+      const marksNewSide = newNoNewline && (row.type === 'add' || row.type === 'ctx') && row.newNo === newLast;
+      if (marksOldSide || marksNewSide) lines.push(NO_NEWLINE);
+    }
+  }
+  return lines.join('\n') + '\n';
+}
+
+/**
+ * Pairs adjacent del-runs with their add-runs and fills in word-level spans.
+ *
+ * Alignment follows the classic trim technique: identical leading/trailing
+ * lines of the two runs are peeled off first so pairing happens only on the
+ * differing core — otherwise a rewritten block pairs unchanged lines against
+ * shifted ones and over-emphasizes everything. Runs of unequal length pair
+ * up to the shorter side; leftover rows stay unpaired.
+ *
+ * Note: `diffWordsWithSpace` splits on whitespace/word boundaries — continuous
+ * CJK prose forms one large token, so word-level granularity there is limited
+ * (the whole differing run lights up). Code diffs are the primary target.
+ */
+export function withWordSpans(rows: DiffRow[]): DiffRow[] {
+  let i = 0;
+  while (i < rows.length) {
+    if (rows[i]!.type !== 'del') {
+      i++;
+      continue;
+    }
+    let delEnd = i;
+    while (delEnd < rows.length && rows[delEnd]!.type === 'del') delEnd++;
+    let addEnd = delEnd;
+    while (addEnd < rows.length && rows[addEnd]!.type === 'add') addEnd++;
+    if (addEnd > delEnd) {
+      const dels = rows.slice(i, delEnd);
+      const adds = rows.slice(delEnd, addEnd);
+      let start = 0;
+      while (start < dels.length && start < adds.length && dels[start]!.text === adds[start]!.text) {
+        start++;
+      }
+      let endDel = dels.length;
+      let endAdd = adds.length;
+      while (endDel > start && endAdd > start && dels[endDel - 1]!.text === adds[endAdd - 1]!.text) {
+        endDel--;
+        endAdd--;
+      }
+      const pairs = Math.min(endDel - start, endAdd - start);
+      for (let k = 0; k < pairs; k++) {
+        applyWordSpans(dels[start + k]!, adds[start + k]!);
+      }
+    }
+    i = addEnd;
+  }
+  return rows;
+}
+
+function applyWordSpans(del: DiffRow, add: DiffRow): void {
+  const delWords: WordSpan[] = [];
+  const addWords: WordSpan[] = [];
+  for (const part of diffWordsWithSpace(del.text, add.text)) {
+    if (part.removed) delWords.push({ value: part.value, changed: true });
+    else if (part.added) addWords.push({ value: part.value, changed: true });
+    else {
+      delWords.push({ value: part.value, changed: false });
+      addWords.push({ value: part.value, changed: false });
+    }
+  }
+  del.words = delWords;
+  add.words = addWords;
+}
+
+export type Segment = { value: string; color?: string; changed: boolean };
+
+/**
+ * Intersects syntax-token segmentation with word segmentation so a changed
+ * word can carry an emphasis background *and* its syntax color. Both inputs
+ * cover the same line text; any coverage mismatch (a defensive case) appends
+ * the remainder as-is.
+ */
+export function intersectSpans(
+  tokens: readonly { value: string; color?: string }[] | null,
+  words: readonly WordSpan[] | undefined,
+): Segment[] {
+  if (!tokens && !words) return [];
+  if (tokens && !words) return tokens.map((t) => ({ value: t.value, color: t.color, changed: false }));
+  if (!tokens && words) return words.map((w) => ({ value: w.value, changed: w.changed }));
+
+  const out: Segment[] = [];
+  let ti = 0;
+  let wi = 0;
+  let posT = 0;
+  let posW = 0;
+  while (ti < tokens!.length && wi < words!.length) {
+    const len = Math.min(
+      tokens![ti]!.value.length - posT,
+      words![wi]!.value.length - posW,
+    );
+    if (len > 0) {
+      out.push({
+        value: tokens![ti]!.value.slice(posT, posT + len),
+        color: tokens![ti]!.color,
+        changed: words![wi]!.changed,
+      });
+    }
+    posT += len;
+    posW += len;
+    if (posT >= tokens![ti]!.value.length) {
+      ti++;
+      posT = 0;
+    }
+    if (posW >= words![wi]!.value.length) {
+      wi++;
+      posW = 0;
+    }
+  }
+  // Coverage mismatch is a defensive case — append remainders so no text is lost.
+  for (let r = ti; r < tokens!.length; r++) {
+    const value = tokens![r]!.value.slice(r === ti ? posT : 0);
+    if (value) out.push({ value, color: tokens![r]!.color, changed: false });
+  }
+  for (let r = wi; r < words!.length; r++) {
+    const value = words![r]!.value.slice(r === wi ? posW : 0);
+    if (value) out.push({ value, changed: words![r]!.changed });
+  }
+  return out;
+}

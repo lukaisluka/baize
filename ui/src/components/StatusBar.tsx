@@ -1,0 +1,164 @@
+import { BadgeCheck, CircleDot, KeyRound, ShieldAlert } from 'lucide-react';
+import { Spinner } from '@astryxdesign/core/Spinner';
+import { StatusDot } from '@astryxdesign/core/StatusDot';
+import type { SessionDocument } from '../protocol/types';
+import type { ConnectionInfo, SessionMode } from '../store';
+import { useForegroundLifecycle } from '../projector/hooks';
+import { isLinkUp } from '../projector/connectionLifecycle';
+import { ContentColumn } from './ContentColumn';
+import './StatusBar.css';
+import { useI18n } from '../i18n/context';
+
+const formatTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+
+/** Session state + live connection on the left, context-usage meter and cost
+ * on the right. Status meaning comes from the lifecycle projection (#53):
+ * this component only maps a ConnectionPhase to pixels. */
+export function StatusBar({ doc, connection, mode, onAuthenticate }: {
+  doc: SessionDocument;
+  /** Display facts (agentName, url) — the status interpretation lives in
+   * the lifecycle projection, consumed below. */
+  connection: ConnectionInfo;
+  mode: SessionMode;
+  /** v1 auth entry (#90): runs one agent-managed login method. */
+  onAuthenticate?: (methodId: string) => void;
+}) {
+  const { t } = useI18n();
+  const lifecycle = useForegroundLifecycle();
+  const usage = doc.usage;
+  const pct = usage.size > 0 ? Math.min(100, (usage.used / usage.size) * 100) : 0;
+
+  return (
+    <div className="statusbar">
+      <ContentColumn className="statusbar-inner">
+        <div className="statusbar-cluster">
+          {mode === 'live' && (
+            <span className="statusbar-conn">
+              {lifecycle.phase === 'connecting' ? (
+                <>
+                  <Spinner size="sm" />
+                  <span className="statusbar-muted">{t('status.connecting')}</span>
+                </>
+              ) : lifecycle.phase === 'error' ? (
+                <span className="truncate statusbar-error" title={lifecycle.error ?? undefined}>
+                  {lifecycle.error}
+                </span>
+              ) : lifecycle.phase === 'auth-required' ? (
+                <span className="truncate statusbar-warn-text" title={lifecycle.error ?? undefined}>
+                  {t('conn.authRequired')}
+                </span>
+              ) : lifecycle.phase === 'disconnected' ? (
+                <span className="statusbar-muted">{t('conn.disconnected')}</span>
+              ) : lifecycle.phase === 'switching-session' ? (
+                <>
+                  <Spinner size="sm" />
+                  <span className="statusbar-muted">{t('status.switching')}</span>
+                </>
+              ) : lifecycle.phase === 'connected-degraded' ? (
+                // A failed switch (or similar non-fatal failure) leaves the
+                // connection up with a reason to show (issue #17).
+                <span className="truncate statusbar-error" title={lifecycle.error ?? undefined}>
+                  {lifecycle.error}
+                </span>
+              ) : (
+                <>
+                  <StatusDot variant="success" label={t('conn.connected')} />
+                  <span className="truncate statusbar-agent" title={connection.url ?? undefined}>
+                    {connection.agentName}
+                  </span>
+                  {connection.authedMethodId ? (
+                    <span
+                      className="statusbar-authed"
+                      title={t('status.authenticatedVia', {
+                        name:
+                          connection.availableAuthMethods.find((m) => m.id === connection.authedMethodId)?.name ??
+                          connection.authedMethodId,
+                      })}
+                    >
+                      <BadgeCheck size={13} />
+                      {t('status.authenticated')}
+                    </span>
+                  ) : (
+                    connection.availableAuthMethods.length > 0 &&
+                    onAuthenticate &&
+                    // 单方法收进一个「认证」按钮;多方法各按方法名成组
+                    // (agent 声明的方法通常个位数,状态栏撑得住)。
+                    (connection.availableAuthMethods.length === 1 ? (
+                      <button
+                        type="button"
+                        className="statusbar-auth-btn"
+                        title={
+                          connection.availableAuthMethods[0]!.description ??
+                          t('status.authenticateVia', { name: connection.availableAuthMethods[0]!.name })
+                        }
+                        onClick={() => onAuthenticate(connection.availableAuthMethods[0]!.id)}
+                      >
+                        <KeyRound size={12} /> {t('status.authenticate')}
+                      </button>
+                    ) : (
+                      connection.availableAuthMethods.map((method) => (
+                        <button
+                          key={method.id}
+                          type="button"
+                          className="statusbar-auth-btn"
+                          title={method.description ?? t('status.authenticateVia', { name: method.name })}
+                          onClick={() => onAuthenticate(method.id)}
+                        >
+                          <KeyRound size={12} /> {method.name}
+                        </button>
+                      ))
+                    ))
+                  )}
+                </>
+              )}
+            </span>
+          )}
+
+          {/* #211: the turn status only speaks when it can act — a turn in
+           * flight, or a live link that can start one. At rest on a broken or
+           * absent live link, "Ready" contradicted the failure text to its
+           * left. Demo is exempt: its pseudo-connection is intentionally
+           * always 'disconnected' (#59 pointer divergence), so mode is the
+           * gate, not the phase. */}
+          {(mode === 'demo' || lifecycle.docStatus !== 'idle' || isLinkUp(lifecycle.phase)) && (
+            <span className="statusbar-session">
+              {lifecycle.docStatus === 'running' ? (
+                <>
+                  <Spinner size="sm" />
+                  <span className="statusbar-muted">{t('status.working')}</span>
+                </>
+              ) : lifecycle.docStatus === 'requires_action' ? (
+                <>
+                  <ShieldAlert size={13} className="statusbar-warn-icon" />
+                  <span className="statusbar-warn-text">{t('status.awaitingApproval')}</span>
+                </>
+              ) : (
+                <>
+                  <CircleDot size={13} className="statusbar-accent-icon" />
+                  <span className="statusbar-muted">{t('status.ready')}</span>
+                </>
+              )}
+            </span>
+          )}
+        </div>
+
+        {usage.size > 0 && (
+          <div className="statusbar-usage">
+            <div className="statusbar-meter">
+              <div
+                className="statusbar-meter-fill"
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <span className="statusbar-mono">
+              {formatTokens(usage.used)} / {formatTokens(usage.size)} tokens
+            </span>
+            {usage.cost && (
+              <span className="statusbar-mono">${usage.cost.amount.toFixed(2)}</span>
+            )}
+          </div>
+        )}
+      </ContentColumn>
+    </div>
+  );
+}

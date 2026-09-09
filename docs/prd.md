@@ -158,7 +158,9 @@ baize CLI — single Node.js process (`npx baize`), binds 127.0.0.1 only
 
 ```text
 ~/.baize/
-├── config.json      # GitLab URL, PAT (chmod 600), poll interval, branch overrides
+├── config.json      # GitLab URL, PAT (chmod 600), poll interval, branch overrides, agentCommand
+├── omp-overlay.yml  # OMP telemetry opt-out, written once by baize (editable)
+├── agent/           # working directory for spawned agent processes
 ├── repos/           # bare mirror clones
 ├── index/           # CBM data
 └── logs/
@@ -489,7 +491,9 @@ Each item has a pass criterion; failure triggers a documented fallback decision 
 
 | # | Question | Method | Pass criterion |
 | - | -------- | ------ | -------------- |
-| 1 | **Distribution/runtime**: CBM's static binary (npm postinstall, confirmed) and OMP can both be spawned and supervised by the baize CLI — incl. CBM daemon lifecycle ownership and OMP's own runtime requirement (Bun vs prebuilt binary, to be confirmed) | Clean-machine test: Node + git only | `npx baize` indexes a repo and answers a question end-to-end (exercises OMP spawn + CBM spawn + UI); offline/locked-down install path via pre-bundled or mirrored binaries documented |
+| 1 | **Distribution/runtime**: CBM's static binary (npm postinstall, confirmed) and OMP can both be spawned and supervised by the baize CLI — incl. CBM daemon lifecycle ownership and OMP's own runtime requirement (Bun vs prebuilt binary, confirmed — see note below) | Clean-machine test: Node + git only | `npx baize` indexes a repo and answers a question end-to-end (exercises OMP spawn + CBM spawn + UI); offline/locked-down install path via pre-bundled or mirrored binaries documented |
+
+> **OMP runtime — confirmed (issue #9)**: OMP v18.1.15 is a Bun script (`#!/usr/bin/env bun`, requires `bun >= 1.3.14`), distributed as the npm package `@oh-my-pi/pi-coding-agent` (binary `omp`). BaiZe spawns it as `omp --mode=acp --config ~/.baize/omp-overlay.yml` — `--mode=acp` is an undocumented-but-standard ACP mode (JSON-RPC over stdio). The overlay disables the startup update check (`startup.checkUpdate: false`), and the bridge strips all `OTEL_*` variables from the child environment, so no telemetry egress by default. The clean-machine end-to-end item above remains open until exercised on a fresh host.
 | 2 | **Multi-repo store**: can one CBM instance hold multiple repositories with repo-scoped queries? | Index 20 repos into one store; run scoped and unscoped queries | Queries correctly scope by repo; no cross-contamination of results |
 | 3 | **Cross-repo relationships**: quantify CBM's `cross-repo-intelligence` mode per relationship type — HTTP routes, gRPC, GraphQL, async topics (**Kafka explicitly; upstream matching is partial**), proto imports | Index 3–5 repos with known cross-repo links; run `index_repository` in `cross-repo-intelligence` mode with `target_projects`; query for each known link | Hit-rate **and false-positive rate** per relationship type recorded (upstream has both failure modes: #523 misses, #1459 false positives); thresholds set at first run — the numbers themselves are the deliverable |
 | 4 | **Incremental indexing**: does a push trigger index update without full re-index? | Push a representative commit; measure latency and changed-work scope | Incremental latency in seconds-to-minutes; no full re-index |
@@ -502,7 +506,7 @@ Each item has a pass criterion; failure triggers a documented fallback decision 
 
 ### CBM distribution/runtime
 
-Confirmed spawnable as an MCP stdio static binary (npm postinstall download). Residual risk: postinstall needs network access to GitHub Releases, and OMP's own runtime requirement (Bun vs prebuilt binary) is unconfirmed. _Mitigation_: Phase 0 item 1; pre-bundle or mirror binaries for locked-down environments.
+Confirmed spawnable as an MCP stdio static binary (npm postinstall download). OMP's runtime requirement is now confirmed (Bun script, `@oh-my-pi/pi-coding-agent`; §17 item 1 note) and BaiZe's ACP bridge spawns it with telemetry opted out (update-check overlay + `OTEL_*` env scrubbing). Residual risk: postinstall needs network access to GitHub Releases, and OMP additionally requires Bun ≥ 1.3.14 on the host (not bundled) — the clean-machine test (§17 item 1) must verify the failure mode when Bun is absent and document the remediation. _Mitigation_: Phase 0 item 1; pre-bundle or mirror binaries for locked-down environments; detect missing Bun early with an actionable error.
 
 ### CBM capability gap
 
@@ -534,7 +538,7 @@ Graph relationships can indirectly expose restricted repository information. _Mi
 
 ## 19. Open Questions
 
-Resolved in v0.2: deployment form (§3); repo onboarding (Fleet in MVP, §7); branch policy (default branch, per-repo override, §7.1); ACL in Personal form (credential delegation, §3.1); UI source (Panda-derived, §6.3). Resolved in v0.2.1: OMP identity (Oh My Pi, §5); desktop sidecar packaging path (§6.5).
+Resolved in v0.2: deployment form (§3); repo onboarding (Fleet in MVP, §7); branch policy (default branch, per-repo override, §7.1); ACL in Personal form (credential delegation, §3.1); UI source (Panda-derived, §6.3). Resolved in v0.2.1: OMP identity (Oh My Pi, §5); desktop sidecar packaging path (§6.5). Resolved by #9: OMP runtime requirement (Bun script, spawned via `omp --mode=acp` with telemetry opted out — §17 item 1 note).
 
 Remaining, each annotated with what it blocks:
 

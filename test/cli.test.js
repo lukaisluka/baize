@@ -50,7 +50,10 @@ test('baize serves the page and exits 0 on SIGINT (clean Ctrl-C)', async () => {
 
     const res = await fetch(match[1])
     assert.equal(res.status, 200)
-    assert.match(await res.text(), /BaiZe/)
+    assert.match(res.headers.get('content-type'), /text\/html/)
+    // Either the built SPA (Panda-derived, has #root) or the build-instruction
+    // page (mentions BaiZe) — depends on whether ui/dist exists in this checkout.
+    assert.match(await res.text(), /id="root"|BaiZe/)
   } finally {
     child.kill('SIGINT')
     assert.equal(await exitCode(child), 0, 'SIGINT exits cleanly with status 0')

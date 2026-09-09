@@ -1,0 +1,936 @@
+/// <reference types="node" />
+
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createConnection, createServer } from 'node:net';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { PROTOCOL_VERSION, client, methods } from '@agentclientprotocol/sdk';
+import { createWebSocketStream } from '@agentclientprotocol/sdk/experimental/ws-client';
+import {
+  LiveAcpClient,
+  type AgentCaps,
+  type LiveClientHandlers,
+} from './LiveAcpClient';
+import { StreamTransport } from './transport/StreamTransport';
+import { WORKSPACE_NONE_CWD } from '../workspace';
+import type { SessionEntry } from '../store';
+import { applyUpdate, emptySession } from '../protocol/reducer';
+import type {
+  AcpContentBlock,
+  AcpSessionUpdate,
+  PermissionRequest,
+  SessionStatus,
+} from '../protocol/types';
+
+/**
+ * 端到端集成测试:拉起 test-agent/ 里的 deepagents 测试 agent(真实的
+ * agent 侧协议栈:LangGraph 工具执行、真实文件 diff、interrupt→权限、
+ * 逐 token 流式、SQLite 会话持久化),LiveAcpClient 走真 WebSocket 连接,
+ * 断言完整回合的 update 序列。与单元测试的区别:agent 端不再是剧本化的
+ * SDK 假件,deepagents-acp + deepagents 全部真实运行,只有 LLM 是确定性
+ * 剧本模型(scenarios.py)。
+ *
+ * 需要 test-agent 已安装依赖(pnpm install 后 test-agent/node_modules 存在,
+ * 内含 tsx);未安装时整组跳过(不破坏 `pnpm test` 的零依赖运行)。
+ * 可用 PANDA_TEST_AGENT_E2E=skip 强制跳过。
+ */
+
+const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
+const PROJECT_DIR = join(REPO_ROOT, 'test-agent');
+
+const forcedSkip = process.env.PANDA_TEST_AGENT_E2E === 'skip';
+const hasAgentDeps = !forcedSkip && existsSync(join(PROJECT_DIR, 'node_modules'));
+
+type Records = {
+  updates: AcpSessionUpdate[];
+  statuses: SessionStatus[];
+  capabilities: AgentCaps[];
+  sessionIds: string[];
+  sessionInfos: { sessionId: string; title?: string | null; updatedAt?: string | null }[];
+  replayStarts: number;
+  /** connect 时 session/list 聚合出的每一批完整列表(#97)。 */
+  sessionLists: SessionEntry[][];
+  /** deleteSession 完成回执的会话 id(#97)。 */
+  sessionDeleted: string[];
+  /** initialize 的常驻登录方式(#90)。 */
+  authMethodOffers: { id: string; name: string; description?: string }[][];
+  /** authenticate 成功的方法 id(#90)。 */
+  authedMethodIds: string[];
+};
+
+async function waitFor(predicate: () => boolean, timeoutMs: number, what: string): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`waitFor timed out: ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+function waitForPort(port: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve, reject) => {
+    const attempt = () => {
+      const socket = createConnection({ host: '127.0.0.1', port }, () => {
+        socket.destroy();
+        resolve();
+      });
+      socket.on('error', () => {
+        socket.destroy();
+        if (Date.now() > deadline) {
+          reject(new Error(`test agent 未在 ${timeoutMs}ms 内监听 ${port} 端口`));
+        } else {
+          setTimeout(attempt, 250);
+        }
+      });
+    };
+    attempt();
+  });
+}
+
+/** Ask the OS for an unused loopback port, then release it for the test agent. */
+function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        server.close();
+        reject(new Error('无法分配测试端口'));
+        return;
+      }
+      server.close((err) => (err ? reject(err) : resolve(address.port)));
+    });
+  });
+}
+
+/** afterAll 卫生清理:Windows 上 sqlite 句柄的释放可能滞后于 taskkill 几十
+ * 毫秒,rmSync 立刻重试可能 EPERM。有界重试后仍失败则 warn 留痕——套件
+ * 结论不应取决于临时目录卫生(目录在 tmp 下,由系统回收)。 */
+async function rmBestEffort(dir: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      if (attempt >= 5) {
+        console.warn(`[e2e] cleanup left ${dir} behind:`, err);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+}
+
+describe.skipIf(!hasAgentDeps)('LiveAcpClient × deepagents 测试 agent(e2e)', () => {
+  let agentProcess: ChildProcess | null = null;
+  let serverLog = '';
+  let sandboxDir = '';
+  let stateDir = '';
+  let port = 0;
+  let acpClient: LiveAcpClient;
+  const records: Records = {
+    updates: [],
+    statuses: [],
+    capabilities: [],
+    sessionIds: [],
+    sessionInfos: [],
+    replayStarts: 0,
+    sessionLists: [],
+    sessionDeleted: [],
+    authMethodOffers: [],
+    authedMethodIds: [],
+  };
+
+  beforeAll(async () => {
+    sandboxDir = mkdtempSync(join(tmpdir(), 'panda-e2e-sandbox-'));
+    stateDir = mkdtempSync(join(tmpdir(), 'panda-e2e-state-'));
+    port = await findFreePort();
+
+    agentProcess = spawn(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        join(PROJECT_DIR, 'src', 'main.ts'),
+        'serve',
+        '--host',
+        '127.0.0.1',
+        '--port',
+        String(port),
+        '--sandbox-dir',
+        sandboxDir,
+        '--state-dir',
+        stateDir,
+      ],
+      {
+        cwd: PROJECT_DIR,
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        // Developer-local test-agent/.env may opt into a billable real model.
+        // E2E assertions must stay deterministic and never consume that key.
+        env: {
+          ...process.env,
+          PANDA_TEST_AGENT_REAL_MODELS: '',
+          PANDA_TEST_AGENT_DEFAULT_MODEL: 'fake:scripted',
+        },
+      },
+    );
+    agentProcess.stdout?.on('data', (d) => (serverLog += d));
+    agentProcess.stderr?.on('data', (d) => (serverLog += d));
+
+    try {
+      await waitForPort(port, 180_000);
+    } catch (err) {
+      console.error('test agent 启动日志:\n' + serverLog);
+      throw err;
+    }
+
+    const handlers: LiveClientHandlers = {
+      onUpdate: (update) => {
+        records.updates.push(update);
+        // Status rides the update stream (#55).
+        if (update.sessionUpdate === 'status_changed') records.statuses.push(update.status);
+      },
+      onSessionModes: () => {},
+      onSessionConfigOptions: () => {},
+      onConnected: () => {},
+      onSessionId: (sessionId) => records.sessionIds.push(sessionId),
+      onDisconnected: () => {},
+      onAuthChallenge: () => {},
+      onAuthElicitation: () => {},
+      onAuthMethods: (methods) => records.authMethodOffers.push(methods),
+      onAuthenticated: (methodId) => records.authedMethodIds.push(methodId),
+      onCapabilities: (capabilities) => records.capabilities.push(capabilities),
+      onSessions: (entries) => records.sessionLists.push(entries),
+      onSessionInfo: (sessionId, info) => records.sessionInfos.push({ sessionId, ...info }),
+      onReplayStart: () => records.replayStarts++,
+      onSessionDeleted: (sessionId) => records.sessionDeleted.push(sessionId),
+      onSessionSwitchStage: () => {},
+      onSessionSwitchCommit: () => {},
+      onSessionSwitchRollback: () => {},
+    };
+    acpClient = new LiveAcpClient(handlers);
+    await acpClient.connect(new StreamTransport(createWebSocketStream(`ws://127.0.0.1:${port}/acp`)), '/tmp/project');
+  }, 180_000);
+
+  afterAll(async () => {
+    acpClient?.disconnect();
+    if (agentProcess?.pid) {
+      if (process.platform === 'win32') {
+        // Windows has no process groups: the previous `kill(-pid)` was a
+        // silent no-op (swallowed by the catch below), so serve stayed alive
+        // holding the sqlite state handles and rmSync failed EPERM. taskkill
+        // /T /F walks the child tree deterministically (#127).
+        try {
+          spawnSync('taskkill', ['/PID', String(agentProcess.pid), '/T', '/F'], { stdio: 'ignore' });
+        } catch {
+          /* 已退出 */
+        }
+      } else {
+        try {
+          process.kill(-agentProcess.pid, 'SIGTERM');
+          await new Promise((r) => setTimeout(r, 500));
+          if (agentProcess.exitCode === null) process.kill(-agentProcess.pid, 'SIGKILL');
+        } catch {
+          /* 进程组可能已退出 */
+        }
+      }
+    }
+    await rmBestEffort(sandboxDir);
+    await rmBestEffort(stateDir);
+  });
+
+  /** 未决权限请求:按事件流时序折叠(requested 置入、resolved 移除)——同一 id 被 agent 重问时重新挂起。 */
+  const pendingPermissionRequests = () => {
+    const pending = new Map<string, PermissionRequest>();
+    for (const update of records.updates) {
+      if (update.sessionUpdate === 'permission_requested') {
+        pending.set(update.request.toolCallId, update.request);
+      } else if (update.sessionUpdate === 'permission_resolved') {
+        pending.delete(update.toolCallId);
+      }
+    }
+    return [...pending.values()];
+  };
+
+  /** 依次批准 ask 模式下的每个权限请求,直到回合结束。 */
+  const approveAllPending = async (expected: number) => {
+    for (let i = 0; i < expected; i++) {
+      await waitFor(
+        () => pendingPermissionRequests().length > 0,
+        30_000,
+        `第 ${i + 1}/${expected} 个权限请求`,
+      );
+      const pending = pendingPermissionRequests();
+      acpClient.resolvePermission(pending[0]!.toolCallId, 'allow_once');
+    }
+  };
+
+  it('声明图片与 load 能力、全套 session 管理能力,并支持模式切换', async () => {
+    expect(records.capabilities).toEqual([
+      { image: true, loadSession: true, list: true, resume: true, delete: true },
+    ]);
+
+    const connection = client({ name: 'panda-e2e-mode-check' }).connect(
+      createWebSocketStream(`ws://127.0.0.1:${port}/acp`),
+    );
+    try {
+      const initialized = await connection.agent.request(methods.agent.initialize, {
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {},
+        clientInfo: { name: 'panda-e2e-mode-check', version: '0.0.0' },
+      });
+      expect(initialized.agentCapabilities?.promptCapabilities?.image).toBe(true);
+      expect(initialized.agentCapabilities?.loadSession).toBe(true);
+      // #97:close/list/delete/resume 四件套与 handler 一一对应
+      expect(initialized.agentCapabilities?.sessionCapabilities).toEqual({
+        close: {},
+        list: {},
+        delete: {},
+        resume: {},
+      });
+
+      const session = await connection.agent.request(methods.agent.session.new, {
+        cwd: '/tmp/project',
+        mcpServers: [],
+      });
+      expect(session.modes?.currentModeId).toBe('ask_before_edits');
+
+      const switched = await connection.agent.request(methods.agent.session.setConfigOption, {
+        sessionId: session.sessionId,
+        configId: 'mode',
+        value: 'accept_everything',
+      });
+      const mode = switched.configOptions.find((option) => option.id === 'mode');
+      expect(mode && mode.type === 'select' ? mode.currentValue : null).toBe(
+        'accept_everything',
+      );
+    } finally {
+      connection.close();
+    }
+  });
+
+  /** Folds a slice of the recorded update stream into a session document. */
+  const foldSlice = (from: number) =>
+    records.updates.slice(from).reduce((doc, update) => applyUpdate(doc, update), emptySession());
+  const userBlocks = (from: number): AcpContentBlock[][] =>
+    foldSlice(from).turns.flatMap((turn) =>
+      turn.blocks.flatMap((block) => (block.kind === 'user_message' ? [block.content] : [])),
+    );
+
+  it(
+    '完整回合:计划→读→改(真实 diff)→执行→总结,权限逐个批准',
+    { timeout: 90_000 },
+    async () => {
+      await acpClient.newSession('/tmp/project');
+
+      const turn = acpClient.send([{ type: 'text', text: '重构 auth 校验' }]);
+      // ask_before_edits 模式下剧本第 1 轮会触发 3 个权限:
+      // write_todos → edit_file → execute
+      await approveAllPending(3);
+      await turn;
+
+      // echo 对账(issue #15):同一 prompt 只渲染一条用户消息
+      const turnStart = records.updates.findIndex((u) => u.sessionUpdate === 'user_message');
+      const sent = userBlocks(turnStart).flat();
+      expect(sent.filter((t) => t.type === 'text' && t.text === '重构 auth 校验')).toHaveLength(1);
+
+      // 回合结束回到 idle
+      expect(records.statuses.at(-1)).toBe('idle');
+      expect(records.sessionInfos).toContainEqual({
+        sessionId: records.sessionIds.at(-1),
+        title: '重构 auth 校验',
+      });
+
+      // 思考块与消息块都真实流过
+      const thoughts = records.updates.filter((u) => u.sessionUpdate === 'agent_thought_chunk');
+      const messages = records.updates.filter((u) => u.sessionUpdate === 'agent_message_chunk');
+      expect(thoughts.length).toBeGreaterThan(10);
+      expect(messages.length).toBeGreaterThan(10);
+      const joined = messages
+        .map((u) => (u.sessionUpdate === 'agent_message_chunk' ? u.content : null))
+        .filter((c): c is { type: 'text'; text: string } => c?.type === 'text')
+        .map((c) => c.text)
+        .join('');
+      expect(joined).toContain('重构完成');
+
+      // 计划卡:write_todos → plan update
+      const plan = records.updates.find((u) => u.sessionUpdate === 'plan');
+      expect(plan && plan.sessionUpdate === 'plan' ? plan.entries : []).toHaveLength(3);
+
+      // 工具卡:read / edit / execute 三种 kind 都出现
+      const toolCalls = records.updates.filter(
+        (u): u is Extract<AcpSessionUpdate, { sessionUpdate: 'tool_call' }> =>
+          u.sessionUpdate === 'tool_call',
+      );
+      const kinds = new Set(toolCalls.map((u) => u.kind));
+      for (const kind of ['read', 'edit', 'execute']) {
+        expect(kinds, `工具卡缺少 kind=${kind}: ${[...kinds]}`).toContain(kind);
+      }
+
+      // 文件操作卡必须带 locations(issue #81):客户端凭它渲染 ZCode 式
+      // 文件行(动词+文件图标+文件名+目录);缺失会退化成旧式长 title
+      const readCall = toolCalls.find((u) => u.kind === 'read');
+      expect(readCall?.locations?.[0]?.path).toBe('/auth.ts');
+      const editCall = toolCalls.find((u) => u.kind === 'edit');
+      expect(editCall?.locations?.[0]?.path).toBe('/auth.ts');
+
+      // edit_file 的 diff 真实送达(来自沙箱里的真实文件改动)
+      const diffs = records.updates.flatMap((u) =>
+        u.sessionUpdate === 'tool_call_update' ? (u.content ?? []) : [],
+      );
+      const editDiff = diffs.find(
+        (c): c is Extract<typeof c, { type: 'diff' }> => c.type === 'diff',
+      );
+      expect(editDiff?.path).toBe('/auth.ts');
+      expect(editDiff?.newText).toContain('!validateSession(session)');
+
+      // 每张工具卡都收到终态推进(issue #75):edit_file 曾整体跳过结果事件,
+      // 卡片永远停在 pending「等待批准」——accept_edits 静默放行时纯误导。
+      // 注意 edit 的 diff 由 Panda 投影成一条无 status 的 update,终态判定只认带 status 的。
+      for (const call of toolCalls) {
+        const final = records.updates.find(
+          (u): u is Extract<AcpSessionUpdate, { sessionUpdate: 'tool_call_update' }> =>
+            u.sessionUpdate === 'tool_call_update' && u.toolCallId === call.toolCallId && u.status !== undefined,
+        );
+        expect(final, `工具卡 ${call.title} 缺少终态 tool_call_update`).toBeDefined();
+        expect(final?.status).toBe('completed');
+      }
+
+      // 沙箱里的文件被 agent 真实修改(工具执行不是演的)
+      expect(readFileSync(join(sandboxDir, 'auth.ts'), 'utf8')).toContain(
+        'if (!validateSession(session)) {',
+      );
+
+      // 权限选项是 Panda 认识的四种 kind 之一
+      const firstRequest = records.updates.find(
+        (u): u is Extract<typeof u, { sessionUpdate: 'permission_requested' }> =>
+          u.sessionUpdate === 'permission_requested',
+      );
+      expect(firstRequest?.request.options.map((o) => o.kind)).toContain('allow_once');
+
+      // 权限请求必须命中已存在的工具卡(issue #77):HITL 的 interrupt.id
+      // 不是工具调用 id,拿它发权限会在客户端落成永不推进的占位卡
+      const permissionRequests = records.updates.filter(
+        (u): u is Extract<AcpSessionUpdate, { sessionUpdate: 'permission_requested' }> =>
+          u.sessionUpdate === 'permission_requested',
+      );
+      const toolCallIds = new Set(toolCalls.map((u) => u.toolCallId));
+      for (const request of permissionRequests) {
+        expect(
+          toolCallIds.has(request.request.toolCallId),
+          `权限请求 toolCallId ${request.request.toolCallId} 未命中任何 tool_call(占位卡回归)`,
+        ).toBe(true);
+      }
+    },
+  );
+
+  it(
+    '第二轮固定回复,验证追加消息',
+    { timeout: 60_000 },
+    async () => {
+      const messageCountBefore = records.updates.filter(
+        (u) => u.sessionUpdate === 'agent_message_chunk',
+      ).length;
+      await acpClient.send([{ type: 'text', text: '收到请回复' }]);
+
+      const newMessages = records.updates
+        .filter((u) => u.sessionUpdate === 'agent_message_chunk')
+        .slice(messageCountBefore);
+      expect(newMessages.length).toBeGreaterThan(0);
+      const joined = newMessages
+        .map((u) =>
+          u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text'
+            ? u.content.text
+            : '',
+        )
+        .join('');
+      expect(joined).toContain('追加消息');
+      expect(records.statuses.at(-1)).toBe('idle');
+    },
+  );
+
+  it('断开后由新 stdio 子进程 session/resume:transcript 保留、thread 上下文延续(#97)', async () => {
+    const sessionId = records.sessionIds.at(-1);
+    expect(sessionId).toBeTruthy();
+    const replayStartsBefore = records.replayStarts;
+    const planCountBefore = records.updates.filter((u) => u.sessionUpdate === 'plan').length;
+
+    acpClient.disconnect();
+    // 断开时 agent 收到 session/close(声明了 sessionCapabilities.close,
+    // #89):运行态释放、历史保留,下面的 resume 接回同一 thread 就是证明。
+    const logBefore = serverLog.length;
+    await waitFor(
+      () => serverLog.slice(logBefore).includes(`closed session ${sessionId}`),
+      5_000,
+      'disconnect 的 session/close 日志',
+    );
+    await acpClient.connect(
+      new StreamTransport(createWebSocketStream(`ws://127.0.0.1:${port}/acp`)),
+      '/tmp/project',
+      { sessionId: sessionId! },
+    );
+
+    // resume 不回放(与 session/load 的区别):replayStarts 不动、
+    // 文档不清空,session id 原样接回。
+    expect(records.replayStarts).toBe(replayStartsBefore);
+    expect(records.sessionIds.at(-1)).toBe(sessionId);
+
+    // thread 上下文真的恢复:该 thread 已有 2 条 HumanMessage,第 3 条按
+    // 剧本得到「后续轮次」固定短回复;若 thread 未接上,消息计数从 1 起
+    // 会重播完整故事(带 write_todos 计划卡),两条断言都会炸。
+    const marker = records.updates.length;
+    const turn = acpClient.send([{ type: 'text', text: '继续对话验证 resume' }]);
+    await turn;
+    const slice = records.updates.slice(marker);
+    const joined = slice
+      .map((u) => (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text' ? u.content.text : ''))
+      .join('');
+    expect(joined).toContain('每轮都回复这段固定文字');
+    expect(
+      records.updates.filter((u) => u.sessionUpdate === 'plan').length,
+      'resume 后重播了完整故事(thread 未恢复)',
+    ).toBe(planCountBefore);
+    expect(records.statuses.at(-1)).toBe('idle');
+  });
+
+  it('session/list:小页分页聚合出全量会话,带标题与活跃时间(#97)', async () => {
+    // 上面的 connect 已自动拉取会话列表;库内此时 2 个会话、页大小 2,
+    // 满页返回 nextCursor 强制客户端走完分页循环,聚合结果才可能齐全。
+    await waitFor(() => records.sessionLists.length > 0, 5_000, 'session/list 聚合结果');
+    const list = records.sessionLists.at(-1)!;
+
+    expect(list.length).toBeGreaterThanOrEqual(2);
+    // 完整回合的会话在列,字段齐全:标题、cwd、活跃时间
+    const titled = list.find((entry) => entry.title === '重构 auth 校验');
+    expect(titled).toBeDefined();
+    expect(titled!.sessionId).toBe(records.sessionIds[1]);
+    expect(titled!.cwd).toBe('/tmp/project');
+    expect(titled!.updatedAt).toBeTruthy();
+    // 最新活跃在前:resume 用例刚活动过的会话排第一
+    expect(list[0]!.sessionId).toBe(records.sessionIds.at(-1));
+  });
+
+  it(
+    '权限挂起时 cancel:回合立即终止,agent 存活',
+    { timeout: 90_000 },
+    async () => {
+      await acpClient.newSession('/tmp/project');
+      const turn = acpClient.send([{ type: 'text', text: '重构 auth 校验' }]);
+      // 等第一个权限请求(剧本会停在 write_todos 的 interrupt 上)
+      await waitFor(
+        () => pendingPermissionRequests().length > 0,
+        30_000,
+        'cancel 用例的权限请求',
+      );
+      // 回合明确卡在权限上时取消——确定性的取消时机
+      acpClient.cancel();
+      await turn;
+      expect(records.statuses.at(-1)).toBe('idle');
+
+      // agent 子进程没有死:新会话还能完整跑一轮
+      const planCountBefore = records.updates.filter((u) => u.sessionUpdate === 'plan').length;
+      await acpClient.newSession('/tmp/project');
+      const turn2 = acpClient.send([{ type: 'text', text: '重构 auth 校验' }]);
+      await approveAllPending(3);
+      await turn2;
+      expect(
+        records.updates.filter((u) => u.sessionUpdate === 'plan').length,
+      ).toBeGreaterThan(planCountBefore);
+    },
+  );
+
+  it(
+    '无工作区会话:cwd="/" 建会话、完整收发,并按同一 cwd 恢复(issue #23, ADR 0005)',
+    { timeout: 90_000 },
+    async () => {
+      await acpClient.newSession(WORKSPACE_NONE_CWD);
+      const sessionId = records.sessionIds.at(-1)!;
+      expect(sessionId).toBeTruthy();
+      const marker = records.updates.length;
+
+      const turn = acpClient.send([{ type: 'text', text: '重构 auth 校验' }]);
+      await approveAllPending(3);
+      await turn;
+      expect(records.statuses.at(-1)).toBe('idle');
+
+      // 完整收发:本回合的总结文字与真实 diff 都流过——test agent 把文件后端
+      // 钉在沙箱目录,协议 cwd 不参与路径解析,`/` 会话一样能干活。
+      const slice = records.updates.slice(marker);
+      const joined = slice
+        .map((u) => (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text' ? u.content.text : ''))
+        .join('');
+      expect(joined).toContain('重构完成');
+      const diffs = slice.flatMap((u) =>
+        u.sessionUpdate === 'tool_call_update' ? (u.content ?? []) : [],
+      );
+      expect(diffs.some((c) => c.type === 'diff' && c.path === '/auth.ts')).toBe(true);
+
+      // 恢复必须逐字使用同一 cwd:重连 resume 该会话,`/` 原样发送。
+      // resume 声明后重连优先走 session/resume(不回放),session id 原样接回。
+      const replayStartsBefore = records.replayStarts;
+      acpClient.disconnect();
+      await acpClient.connect(
+        new StreamTransport(createWebSocketStream(`ws://127.0.0.1:${port}/acp`)),
+        WORKSPACE_NONE_CWD,
+        { sessionId },
+      );
+      expect(records.replayStarts).toBe(replayStartsBefore);
+      expect(records.sessionIds.at(-1)).toBe(sessionId);
+    },
+  );
+
+  it(
+    '回合中途切模式:剩余审批按新模式即时静默放行(issue #79)',
+    { timeout: 90_000 },
+    async () => {
+      await acpClient.newSession('/tmp/project');
+      const start = records.updates.length;
+      const turn = acpClient.send([{ type: 'text', text: '重构 auth 校验' }]);
+      // 第一个权限(write_todos)挂起时不答,先切 accept_everything——
+      // 修复前:本回合的 graph 仍按 ask_before_edits 继续,edit/execute
+      // 还会弹卡;修复后:壳层现查会话模式,剩余工具静默放行
+      await waitFor(() => pendingPermissionRequests().length > 0, 30_000, '第一个权限请求');
+      await acpClient.setMode('accept_everything');
+      acpClient.resolvePermission(pendingPermissionRequests()[0]!.toolCallId, 'allow_once');
+      await turn;
+
+      const slice = records.updates.slice(start);
+      const permissionCount = slice.filter(
+        (u) => u.sessionUpdate === 'permission_requested',
+      ).length;
+      expect(permissionCount).toBe(1);
+      // 回合完整走完:edit diff 与总结都送达,没有因审批被卡住
+      const joined = slice
+        .map((u) =>
+          u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text'
+            ? u.content.text
+            : '',
+        )
+        .join('');
+      expect(joined).toContain('重构完成');
+      expect(records.statuses.at(-1)).toBe('idle');
+    },
+  );
+
+  it('切换/新建会话时 agent 对被离开的会话收到 session/close(#89)', { timeout: 90_000 }, async () => {
+    // 当前活跃会话(上一用例留下的)
+    const previousId = records.sessionIds.at(-1)!;
+    const logBefore = serverLog.length;
+
+    await acpClient.newSession('/tmp/project');
+    expect(records.sessionIds.at(-1)).not.toBe(previousId);
+    await waitFor(
+      () => serverLog.slice(logBefore).includes(`closed session ${previousId}`),
+      5_000,
+      '切换会话的 session/close 日志',
+    );
+
+    // 被关的会话历史仍可 load 重放:close 只清运行态,不动 SQLite。
+    const replaysBefore = records.replayStarts;
+    await acpClient.loadSession(previousId, '/tmp/project');
+    expect(records.replayStarts).toBe(replaysBefore + 1);
+  });
+
+  it('主动认证:authMethods 上报、authenticate 往返、落已认证记录(#90)', { timeout: 90_000 }, async () => {
+    // test-agent 在 initialize 声明了 panda-token(假实现,无条件成功);
+    // e2e 全程多次重连,每次 initialize 的 offer 必须一致
+    const expectedOffer = [
+      {
+        id: 'panda-token',
+        name: 'Panda 访问令牌',
+        description: '测试用登录方式:点击即认证成功(假实现,不校验凭据)',
+      },
+    ];
+    expect(records.authMethodOffers.length).toBeGreaterThan(0);
+    for (const offer of records.authMethodOffers) {
+      expect(offer).toEqual(expectedOffer);
+    }
+
+    const logBefore = serverLog.length;
+    await acpClient.authenticate('panda-token');
+    // agent 侧收到并记录
+    await waitFor(
+      () => serverLog.slice(logBefore).includes('authenticated via "panda-token"'),
+      5_000,
+      'authenticate 日志',
+    );
+    // 客户端落「已认证」记录,且新会话已重建(会话 id 换新)
+    expect(records.authedMethodIds).toEqual(['panda-token']);
+    expect(records.sessionIds.length).toBeGreaterThan(1);
+  });
+
+  it('常驻通知:命令表随会话送达,用量与活跃时间随回合上报(#99)', { timeout: 90_000 }, async () => {
+    const start = records.updates.length;
+    await acpClient.newSession('/tmp/project');
+    await acpClient.setMode('accept_everything');
+
+    // available_commands_update → commands_update:newSession 即送达,3 条命令
+    await waitFor(
+      () => records.updates.slice(start).some((u) => u.sessionUpdate === 'commands_update'),
+      5_000,
+      'available_commands_update 投影',
+    );
+    const commands = records.updates
+      .slice(start)
+      .find((u): u is Extract<AcpSessionUpdate, { sessionUpdate: 'commands_update' }> => u.sessionUpdate === 'commands_update')!
+      .commands;
+    expect(commands.map((command) => command.name)).toEqual(['/plan', '/model', '/summarize']);
+    expect(commands.every((command) => command.description.length > 0)).toBe(true);
+
+    // 一个回合结束后:usage_update(确定性假用量)+ session_info_update.updatedAt
+    // (该 kind 走 onSessionInfo 侧线,records 里从 sessionInfos 观察)
+    const infosBefore = records.sessionInfos.length;
+    const turn = acpClient.send([{ type: 'text', text: '重构 auth 校验' }]);
+    await turn;
+    const slice = records.updates.slice(start);
+    const usage = slice.find(
+      (u): u is Extract<AcpSessionUpdate, { sessionUpdate: 'usage_update' }> => u.sessionUpdate === 'usage_update',
+    );
+    expect(usage, '回合结束应有 usage_update').toBeDefined();
+    expect(usage!.used).toBeGreaterThanOrEqual(4096);
+    expect(usage!.used % 4096).toBe(0);
+    expect(usage!.size).toBe(131_072);
+    expect(usage!.cost?.currency).toBe('USD');
+    const session = records.sessionIds.at(-1)!;
+    expect(
+      records.sessionInfos.slice(infosBefore).some((info) => info.sessionId === session && info.updatedAt != null),
+      '回合结束应推送 session_info_update.updatedAt',
+    ).toBe(true);
+    expect(records.statuses.at(-1)).toBe('idle');
+  });
+
+  it('set_mode 与 mode 配置项广播 current_mode_update / config_option_update(#99)', { timeout: 60_000 }, async () => {
+    await acpClient.newSession('/tmp/project');
+    const start = records.updates.length;
+
+    // 模式切换是双路径:set_mode 的 RPC 响应由客户端自投影一条 mode_changed
+    // (无 raw),agent 的 current_mode_update 通知再落一条(带 raw)——同状态
+    // 幂等。断言盯住「带 raw 的通知路径真的到了」。
+    await acpClient.setMode('accept_edits');
+    const afterSetMode = records.updates
+      .slice(start)
+      .filter((u): u is Extract<AcpSessionUpdate, { sessionUpdate: 'mode_changed' }> => u.sessionUpdate === 'mode_changed');
+    expect(afterSetMode.map((u) => u.modeId)).toEqual(['accept_edits', 'accept_edits']);
+    expect(afterSetMode.filter((u) => u.raw !== undefined).length).toBe(1);
+    expect(afterSetMode.filter((u) => u.raw === undefined).length).toBe(1);
+
+    await acpClient.setConfigOption('mode', 'accept_everything');
+    const slice = records.updates.slice(start);
+    // mode 走配置项:agent 的模式通知同样要到
+    expect(
+      slice.some(
+        (u): u is Extract<AcpSessionUpdate, { sessionUpdate: 'mode_changed' }> =>
+          u.sessionUpdate === 'mode_changed' && u.modeId === 'accept_everything' && u.raw !== undefined,
+      ),
+      'mode 配置项应触发 agent 的 current_mode_update 通知',
+    ).toBe(true);
+    const optionsUpdates = slice.filter(
+      (u): u is Extract<AcpSessionUpdate, { sessionUpdate: 'config_options_update' }> =>
+        u.sessionUpdate === 'config_options_update',
+    );
+    expect(optionsUpdates.length).toBeGreaterThanOrEqual(2);
+    const modeOption = optionsUpdates.at(-1)!.options.find((option) => option.id === 'mode');
+    expect(modeOption && 'currentValue' in modeOption ? modeOption.currentValue : null).toBe('accept_everything');
+  });
+
+  it('form elicitation:agent 发表单、客户端应答、答复回显进消息流(#99)', { timeout: 90_000 }, async () => {
+    await acpClient.newSession('/tmp/project');
+    await acpClient.setMode('accept_everything');
+    const start = records.updates.length;
+
+    const turn = acpClient.send([{ type: 'text', text: '请用表单确认部署' }]);
+    await waitFor(
+      () => records.updates.slice(start).some((u) => u.sessionUpdate === 'elicitation_requested'),
+      30_000,
+      'form elicitation 请求',
+    );
+    const request = records.updates
+      .slice(start)
+      .find(
+        (u): u is Extract<AcpSessionUpdate, { sessionUpdate: 'elicitation_requested' }> =>
+          u.sessionUpdate === 'elicitation_requested',
+      )!
+      .request;
+    expect(request.mode).toBe('form');
+    expect(request.mode === 'form' ? request.fields.some((field) => field.key === 'environment') : false).toBe(true);
+
+    // 程序化应答(等价于用户在表单 UI 提交)
+    acpClient.resolveElicitation(request.id, { outcome: 'accepted', content: { environment: 'staging' } });
+    await turn;
+
+    const slice = records.updates.slice(start);
+    const joined = slice
+      .map((u) => (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text' ? u.content.text : ''))
+      .join('');
+    // 答复回显:agent 把表单结果写进消息流,剧本回合照常收尾
+    expect(joined).toContain('表单触发完成');
+    expect(joined).toContain('staging');
+    expect(
+      slice.some(
+        (u): u is Extract<AcpSessionUpdate, { sessionUpdate: 'elicitation_resolved' }> =>
+          u.sessionUpdate === 'elicitation_resolved',
+      ),
+    ).toBe(true);
+    expect(records.statuses.at(-1)).toBe('idle');
+  });
+
+  it('url elicitation:consent 后 agent 发 complete 通知闭环(#99)', { timeout: 90_000 }, async () => {
+    await acpClient.newSession('/tmp/project');
+    await acpClient.setMode('accept_everything');
+    const start = records.updates.length;
+
+    const turn = acpClient.send([{ type: 'text', text: '请打开链接完成授权' }]);
+    await waitFor(
+      () => records.updates.slice(start).some((u) => u.sessionUpdate === 'elicitation_requested'),
+      30_000,
+      'url elicitation 请求',
+    );
+    const request = records.updates
+      .slice(start)
+      .find(
+        (u): u is Extract<AcpSessionUpdate, { sessionUpdate: 'elicitation_requested' }> =>
+          u.sessionUpdate === 'elicitation_requested',
+      )!
+      .request;
+    expect(request.mode).toBe('url');
+    if (request.mode !== 'url') return;
+
+    // 同意打开(浏览器动作属 UI,e2e 只推进协议):agent 收到 accept 后
+    // 发 elicitation/complete,客户端挂起请求落定为 completed。
+    acpClient.resolveElicitation(request.id, { outcome: 'accepted', content: {} });
+    await waitFor(
+      () =>
+        records.updates
+          .slice(start)
+          .some(
+            (u): u is Extract<AcpSessionUpdate, { sessionUpdate: 'elicitation_url_completed' }> =>
+              u.sessionUpdate === 'elicitation_url_completed' && u.elicitationId === request.id,
+          ),
+      30_000,
+      'elicitation/complete 通知',
+    );
+    await turn;
+    const joined = records.updates
+      .slice(start)
+      .map((u) => (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text' ? u.content.text : ''))
+      .join('');
+    expect(joined).toContain('链接授权已完成');
+    expect(records.statuses.at(-1)).toBe('idle');
+  });
+
+  it('compaction 全周期:in_progress → 摘要 chunk → completed(#99)', { timeout: 90_000 }, async () => {
+    await acpClient.newSession('/tmp/project');
+    await acpClient.setMode('accept_everything');
+    const start = records.updates.length;
+
+    const turn = acpClient.send([{ type: 'text', text: '请压缩上下文' }]);
+    await turn;
+    const slice = records.updates.slice(start);
+    const compactions = slice.filter(
+      (u): u is Extract<AcpSessionUpdate, { sessionUpdate: 'compaction_update' }> => u.sessionUpdate === 'compaction_update',
+    );
+    expect(compactions.map((u) => u.status)).toEqual(['in_progress', 'completed']);
+    const id = compactions[0]!.compactionId;
+    const chunks = slice.filter(
+      (u): u is Extract<AcpSessionUpdate, { sessionUpdate: 'compaction_summary_chunk' }> =>
+        u.sessionUpdate === 'compaction_summary_chunk',
+    );
+    expect(chunks.map((u) => u.compactionId)).toEqual([id, id]);
+    // completed 带 summary(整段折叠摘要)
+    const completed = compactions[1]!;
+    expect(completed.summary?.length ?? 0).toBeGreaterThan(0);
+    expect(records.statuses.at(-1)).toBe('idle');
+  });
+
+  it('plan_update(items) 标记完成后 plan_removed 撤下计划(#99)', { timeout: 90_000 }, async () => {
+    await acpClient.newSession('/tmp/project');
+    await acpClient.setMode('accept_everything');
+    const start = records.updates.length;
+
+    const turn = acpClient.send([{ type: 'text', text: '请清理计划' }]);
+    await turn;
+    const slice = records.updates.slice(start);
+    // plan_update(items) 投影成 plan 事件;plan_removed 随后撤下
+    const removedAt = slice.findIndex((u) => u.sessionUpdate === 'plan_removed');
+    expect(removedAt, '应收到 plan_removed').toBeGreaterThan(-1);
+    const plans = slice.slice(0, removedAt).filter((u) => u.sessionUpdate === 'plan');
+    const lastPlan = plans.at(-1) as Extract<AcpSessionUpdate, { sessionUpdate: 'plan' }> | undefined;
+    expect(lastPlan?.entries.length).toBe(3);
+    expect(lastPlan?.entries.every((entry) => entry.status === 'completed')).toBe(true);
+    expect(records.statuses.at(-1)).toBe('idle');
+  });
+
+  it('auth/logout:登出清服务端认证记录,可重新认证(#99)', { timeout: 60_000 }, async () => {
+    const logBefore = serverLog.length;
+    await acpClient.logout();
+    await waitFor(
+      () => serverLog.slice(logBefore).includes('logged out'),
+      5_000,
+      'logout 日志',
+    );
+    // 登出不断连接:重新认证仍成功
+    await acpClient.authenticate('panda-token');
+    await waitFor(
+      () => (serverLog.slice(logBefore).split('logged out')[1] ?? '').includes('authenticated via "panda-token"'),
+      5_000,
+      '登出后的再次 authenticate 日志',
+    );
+  });
+
+  it('session/delete:抹除会话后列表移除、load 拒绝(#97)', { timeout: 60_000 }, async () => {
+    // 自建一个专用会话再删,避免误伤其他用例依赖的会话
+    await acpClient.newSession('/tmp/project');
+    const doomed = records.sessionIds.at(-1)!;
+
+    await acpClient.deleteSession(doomed);
+    await waitFor(
+      () => records.sessionDeleted.includes(doomed),
+      5_000,
+      'deleteSession 的 onSessionDeleted 回执',
+    );
+
+    // 服务端真抹了:直连 probe 对该会话 session/load 必须 Session not found
+    // (元数据行与线程 checkpoints 一并删除)。
+    const probe = client({ name: 'panda-e2e-delete-probe' }).connect(
+      createWebSocketStream(`ws://127.0.0.1:${port}/acp`),
+    );
+    try {
+      // mcpServers 必填:SDK 服务端 zod 校验缺失即 -32602,到不了 handler。
+      // handler 抛的普通 Error 被连接层包成 -32603,原文进 data.details。
+      await expect(
+        probe.agent.request(methods.agent.session.load, {
+          sessionId: doomed,
+          cwd: '/tmp/project',
+          mcpServers: [],
+        }),
+      ).rejects.toMatchObject({
+        code: -32603,
+        data: { details: expect.stringContaining('Session not found') },
+      });
+    } finally {
+      probe.close();
+    }
+
+    // 重连拉新列表:被删会话不在其中,其余会话仍在(delete 没有殃及旁人)。
+    // list 随 connect 同步完成,基线必须在 disconnect 前取。
+    const listCountBefore = records.sessionLists.length;
+    acpClient.disconnect();
+    await acpClient.connect(
+      new StreamTransport(createWebSocketStream(`ws://127.0.0.1:${port}/acp`)),
+      '/tmp/project',
+    );
+    await waitFor(
+      () => records.sessionLists.length > listCountBefore,
+      5_000,
+      '重连后的 session/list',
+    );
+    const list = records.sessionLists.at(-1)!;
+    expect(list.every((entry) => entry.sessionId !== doomed)).toBe(true);
+    expect(list.some((entry) => entry.title === '重构 auth 校验')).toBe(true);
+  });
+});

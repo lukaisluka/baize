@@ -1,0 +1,110 @@
+/* Unified diff table (tool-call details). */
+
+.diff-container {
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: var(--panda-radius-lg);
+  background: var(--color-surface);
+}
+
+.diff-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--color-border);
+  padding: 8px 14px; /* px-3.5 py-2 */
+  background: color-mix(in oklab, var(--color-raised) 40%, transparent);
+}
+
+/* 路径靠左(margin-right auto);统计与复制按钮(#84)成组靠右。 */
+.diff-header-path {
+  margin-right: auto;
+  font-family: var(--font-mono);
+  font-size: var(--panda-size-content);
+  color: var(--color-muted);
+}
+
+.diff-header-lines {
+  font-family: var(--font-mono);
+  font-size: var(--panda-size-content);
+}
+
+.diff-lines-add { color: var(--color-add); }
+.diff-lines-del { color: var(--color-danger); }
+
+.diff-scroll {
+  overflow-x: auto;
+}
+
+.diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: var(--panda-size-content);
+  line-height: 1.5;
+}
+
+/* Line-number gutters. */
+.diff-gutter {
+  width: 40px; /* w-10 */
+  min-width: 40px;
+  padding-inline: 8px; /* px-2 */
+  text-align: right;
+  vertical-align: top;
+  user-select: none;
+  color: color-mix(in oklab, var(--color-faint) 70%, transparent);
+}
+
+/* +/- marker column. */
+.diff-marker {
+  width: 16px; /* w-4 */
+  min-width: 16px;
+  text-align: center;
+  vertical-align: top;
+  user-select: none;
+  color: transparent;
+}
+.diff-marker--add { color: var(--color-add); }
+.diff-marker--del { color: var(--color-danger); }
+
+.diff-cell {
+  padding: 0 16px 0 8px; /* px-2 pr-4 */
+  vertical-align: top;
+  white-space: pre;
+  color: color-mix(in oklab, var(--color-fg) 85%, transparent);
+}
+
+.diff-row--add .diff-cell { background: var(--color-diff-add); }
+.diff-row--del .diff-cell { background: var(--color-diff-del); }
+
+/* 未变更段折叠占位(#88):横跨全表的按钮行,点击展开该段。 */
+.diff-fold > td {
+  padding: 0;
+}
+
+.diff-fold-btn {
+  display: block;
+  width: 100%;
+  border: none;
+  padding: 2px 0;
+  background: color-mix(in oklab, var(--color-raised) 45%, transparent);
+  color: var(--color-muted);
+  font-family: var(--font-mono);
+  font-size: var(--panda-size-code);
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.diff-fold-btn:hover {
+  background: color-mix(in oklab, var(--color-raised) 80%, transparent);
+  color: var(--color-fg);
+}
+
+.diff-word--add {
+  border-radius: 2px;
+  background: color-mix(in oklab, var(--color-add) 25%, transparent);
+}
+.diff-word--del {
+  border-radius: 2px;
+  background: color-mix(in oklab, var(--color-danger) 30%, transparent);
+}

@@ -14,14 +14,22 @@
   "engines": {
     "node": ">=20"
   },
+  "workspaces": [
+    "ui"
+  ],
   "files": [
-    "src"
+    "src",
+    "ui/dist"
   ],
   "scripts": {
     "start": "node src/cli.js",
-    "test": "node --test"
+    "build:ui": "npm run build -w ui",
+    "prepack": "npm run build:ui",
+    "test": "node --test test/*.test.js",
+    "test:ui": "npm run test -w ui"
   },
   "dependencies": {
-    "codebase-memory-mcp": "0.10.8"
+    "codebase-memory-mcp": "0.10.8",
+    "ws": "^8.21.3"
   }
 }

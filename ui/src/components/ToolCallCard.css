@@ -1,0 +1,241 @@
+/* Tool-call card: summary row + expandable raw input and results. */
+
+.tool-card {
+  /* ZCode spacing ladder: text↔tool 14px, tool↔tool 8px. The default
+   * (14px) covers text↔first-card and last-card↔text; MessageStream adds
+   * the run modifiers below from the flat block sequence. 14px < body
+   * line height (22.4px) is intentional: ZCode keeps block gaps under a
+   * line of body text — grouping is signalled by the quiet row style,
+   * not air. */
+  margin-block: 14px;
+}
+
+/* Run modifiers: cards inside a run of consecutive tool calls sit 8px
+ * apart. BOTH sides must drop — margins collapse through the item
+ * wrappers (no block padding/border), so a single 8px side would still
+ * read 14px. Set in React (itemContent) because CSS sibling selectors
+ * can't see across the virtualizer's per-item wrappers. */
+.tool-card--after-tool { margin-block-start: 8px; }
+.tool-card--before-tool { margin-block-end: 8px; }
+
+/* ZCode-style: no card box. The tool call is a lightweight quiet row that
+ * sits directly on the page surface; state lives in the trailing badge,
+ * expansion in the indented details rail. Radius only shapes the row
+ * hover wash. */
+.tool-card-frame {
+  border-radius: var(--panda-radius-lg);
+}
+
+.tool-card-toggle {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px; /* gap-2.5 */
+  /* No inline padding — the row (icon → title) must sit flush with the
+   * left edge of body text, which has none either. */
+  padding: 6px 0;
+  text-align: left;
+  transition: var(--panda-colors-transition);
+}
+.tool-card-toggle:hover {
+  background: color-mix(in oklab, var(--color-raised) 40%, transparent);
+}
+
+.tool-card-icon {
+  flex-shrink: 0;
+  color: var(--panda-chrome-text);
+}
+
+/* File-type icon (FileTypeIcon): an <img>, not a lucide <svg> — keep it
+ * unsquashed in the flex row; alignment comes from the row's centering. */
+.tool-file-icon {
+  flex: none;
+  display: block;
+}
+
+/* Basename in the file row: a filename is a code string, so mono — unlike
+ * the verb span, which stays sans like every other tool title. */
+.tool-card-file {
+  min-width: 0;
+  font-family: var(--panda-font-code);
+  color: var(--panda-chrome-text);
+}
+
+.tool-card-title {
+  min-width: 0;
+  /* ZCode-style tool row: body (sans) face, quiet color — the name reads
+   * as chrome, not content. One size for the whole content area
+   * (joint-debug): hierarchy by grayscale only. Sans, not mono: the
+   * reference client renders tool names like permission prompts (Inter),
+   * mono is for the payload inside the expanded rail. */
+  font-family: var(--font-sans);
+  font-size: var(--panda-size-content);
+  color: var(--panda-chrome-text);
+}
+
+.tool-card-stats {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--panda-size-content);
+}
+.tool-stats-add { color: var(--color-add); }
+.tool-stats-del { color: var(--color-danger); }
+
+.tool-card-path {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--panda-size-content);
+  color: var(--color-faint);
+}
+
+/* Line anchor in the file row (`base:line`, ZCode-style) — mono like the
+ * basename, but faint like the directory: an anchor, not content. */
+.tool-card-line {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--panda-size-content);
+  color: var(--color-faint);
+}
+
+.tool-card-status {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  /* Astryx Badge pins its own 12px; the content area runs one size —
+   * (0,1,1) outspecifies the badge's single stylex class. */
+  & span { font-size: var(--panda-size-content); }
+}
+
+.tool-status-icon { flex-shrink: 0; }
+.tool-status-icon--ok { color: var(--color-accent); }
+.tool-status-icon--err { color: var(--color-danger); }
+.tool-status-icon--faint { color: var(--color-faint); }
+
+.tool-card-chevron {
+  flex-shrink: 0;
+  color: var(--color-faint);
+  transition: transform 150ms var(--panda-ease);
+}
+.tool-card-chevron--open {
+  transform: rotate(180deg);
+}
+
+.tool-card-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px; /* space-y-2 */
+  margin: 6px 0 0 8px; /* mt-1.5 ml-2 */
+  border-left: 1px solid var(--color-border);
+  padding-left: 12px; /* pl-3 */
+}
+
+.tool-input-details {
+  border: 1px solid color-mix(in oklab, var(--color-border) 70%, transparent);
+  border-radius: var(--panda-radius-md);
+  background: color-mix(in oklab, var(--color-surface) 60%, transparent);
+}
+
+.tool-input-summary {
+  padding: 6px 12px; /* px-3 py-1.5 */
+  font-size: var(--panda-size-content);
+  font-weight: 500;
+  color: var(--color-faint);
+  cursor: pointer;
+  user-select: none;
+  transition: var(--panda-colors-transition);
+}
+.tool-input-summary:hover {
+  color: var(--color-fg);
+}
+.tool-input-details[open] > .tool-input-summary {
+  color: var(--color-muted);
+}
+
+.tool-input-pre {
+  overflow-x: auto;
+  padding: 0 12px 10px; /* px-3 pb-2.5 */
+  font-family: var(--font-mono);
+  font-size: var(--panda-size-content);
+  line-height: 1.5;
+  color: var(--color-muted);
+}
+
+.tool-text-box {
+  border: 1px solid color-mix(in oklab, var(--color-border) 70%, transparent);
+  border-radius: var(--panda-radius-lg);
+  background: color-mix(in oklab, var(--color-surface) 60%, transparent);
+  padding: 10px 14px; /* px-3.5 py-2.5 */
+  color: var(--color-muted);
+}
+
+.tool-waiting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px; /* px-1 py-0.5 */
+  font-size: var(--panda-size-content);
+  color: var(--color-faint);
+}
+
+/* Fallback row for protocol content Panda cannot render (audio, resource,
+ * terminal, …) — wire.ts maps those to explicit `unsupported` entries so the
+ * stream admits they exist instead of silently losing them. */
+.tool-unsupported {
+  color: var(--color-faint);
+}
+
+/* —— Input 特化视图(#83)—— */
+
+/* execute 命令:终端样式一行,与折叠行的截断命令互补(这里完整)。 */
+.tool-input-command {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  border: 1px solid color-mix(in oklab, var(--color-border) 70%, transparent);
+  border-radius: var(--panda-radius-md);
+  background: color-mix(in oklab, var(--color-surface) 60%, transparent);
+  padding: 6px 12px; /* px-3 py-1.5,与 .tool-input-summary 对齐 */
+  font-family: var(--font-mono);
+  font-size: var(--panda-size-content);
+}
+
+.tool-input-command-sign {
+  flex: none;
+  color: var(--color-faint);
+}
+
+.tool-input-command code {
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--color-muted);
+}
+
+/* 特化后的剩余标量参数:安静的自述键值表,无框(chrome,不是内容)。 */
+.tool-input-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+}
+
+.tool-input-field {
+  display: flex;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: var(--panda-size-content);
+  line-height: 1.5;
+}
+
+.tool-input-field dt {
+  flex: none;
+  color: var(--color-faint);
+}
+
+.tool-input-field dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--color-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

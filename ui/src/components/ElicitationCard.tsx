@@ -1,0 +1,263 @@
+import { CircleCheckBig, FormInput } from 'lucide-react';
+import { Button } from '@astryxdesign/core/Button';
+import { Selector } from '@astryxdesign/core/Selector';
+import { TextInput } from '@astryxdesign/core/TextInput';
+import type {
+  AcpElicitationField,
+  ElicitationRequest,
+  ElicitationResponse,
+} from '../protocol/types';
+import type { AttachedElicitation } from '../projector/messageStream';
+import { draftValuesFor, useElicitationDrafts } from '../elicitationDrafts';
+import './ElicitationCard.css';
+import { useI18n } from '../i18n/context';
+
+/**
+ * The form-mode elicitation card: the agent asked the user for structured
+ * input (`elicitation/create`, form mode). The wire schema restricts fields
+ * to primitives, so the form is hand-rolled — one input per field variant,
+ * required-gated submit, decline always available. Settled cards keep a
+ * one-line terminal record in the flow.
+ */
+export function ElicitationCard({ elicitation, onResolve }: {
+  elicitation: AttachedElicitation;
+  onResolve: (id: string, response: ElicitationResponse) => void;
+}) {
+  const { request } = elicitation;
+  if (request.mode !== 'form') return null; // url renders via ElicitationUrlCard
+  if (elicitation.state === 'settled') return <SettledElicitationCard elicitation={{ ...elicitation, request }} />;
+  return <PendingElicitationCard request={request} onResolve={onResolve} />;
+}
+
+type FormRequest = Extract<ElicitationRequest, { mode: 'form' }>;
+
+function PendingElicitationCard({ request, onResolve }: {
+  request: FormRequest;
+  onResolve: (id: string, response: ElicitationResponse) => void;
+}) {
+  const { t } = useI18n();
+  // Half-filled values live in the per-elicitation draft store (bug hunt
+  // #16): the virtualized stream unmounts rows scrolled out of view and the
+  // foreground session may switch away and back — local state would silently
+  // wipe the form while its RPC still hangs.
+  const values = useElicitationDrafts((s) => draftValuesFor(s, request.id));
+  const set = (key: string, value: string | number | boolean | string[]) =>
+    useElicitationDrafts.getState().setField(request.id, key, value);
+  const settle = (response: ElicitationResponse) => {
+    useElicitationDrafts.getState().clearDraft(request.id);
+    onResolve(request.id, response);
+  };
+
+  const numberError = request.fields.find((field) => {
+    if (field.type !== 'number' && field.type !== 'integer') return false;
+    const raw = values[field.key];
+    if (raw === undefined || raw === '') return false; // absence is required's business
+    const parsed = typeof raw === 'number' ? raw : Number(raw);
+    if (Number.isNaN(parsed)) return true;
+    return field.type === 'integer' && !Number.isInteger(parsed);
+  });
+
+  // Boolean is exempt: a checkbox's either state IS an answer (JSON Schema
+  // has no unanswered-vs-false distinction — that's what defaults are for),
+  // so forcing a check would outlaw the legitimate false answer. Unsupported
+  // fields can never satisfy a requirement — but they can't fail one either.
+  const missingRequired = request.fields.find((field) => {
+    if (field.type === 'unsupported' || field.type === 'boolean' || !field.required) return false;
+    const value = values[field.key] ?? defaultsFor(field);
+    if (Array.isArray(value)) return value.length === 0;
+    return value === undefined || value === '';
+  });
+
+  const canSubmit = !missingRequired && !numberError;
+
+  const submit = () => {
+    if (!canSubmit) return;
+    const content: Record<string, string | number | boolean | string[]> = {};
+    for (const field of request.fields) {
+      const fallback = defaultsFor(field);
+      const value = values[field.key] ?? fallback;
+      if (value === undefined || value === '') continue; // optional & untouched
+      if (field.type === 'number' || field.type === 'integer') {
+        // Text inputs carry strings; the wire answer must carry numbers.
+        const parsed = typeof value === 'number' ? value : Number(value);
+        if (Number.isNaN(parsed)) continue; // numberError already gates submit
+        content[field.key] = parsed;
+      } else if (Array.isArray(value) && value.length === 0) {
+        continue; // optional multiselect with nothing picked
+      } else {
+        content[field.key] = value;
+      }
+    }
+    settle({ outcome: 'accepted', content });
+  };
+
+  return (
+    <div className="elicit-card">
+      <div className="elicit-head">
+        <FormInput size={14} />
+        {t('elicit.title')}
+      </div>
+      {request.title && <p className="elicit-title">{request.title}</p>}
+      {request.description && <p className="elicit-desc">{request.description}</p>}
+      <div className="elicit-fields">
+        {request.fields.map((field) => (
+          <ElicitationField key={field.key} field={field} value={values[field.key] ?? defaultsFor(field)} onChange={(value) => set(field.key, value)} />
+        ))}
+      </div>
+      <div className="elicit-actions">
+        <Button size="sm" variant="secondary" label={t('elicit.reject')} clickAction={() => settle({ outcome: 'declined' })} />
+        <Button size="sm" variant="primary" label={t('elicit.submit')} isDisabled={!canSubmit} clickAction={submit} />
+      </div>
+    </div>
+  );
+}
+
+/** The schema default (or a sensible empty), so untouched fields behave. */
+function defaultsFor(field: AcpElicitationField): string | number | boolean | string[] | undefined {
+  switch (field.type) {
+    case 'string':
+      // A Selector has no empty option: with no default, the first choice
+      // stands in as the initial value.
+      return field.default ?? (field.options && field.options.length > 0 ? field.options[0]?.value : undefined);
+    case 'number':
+    case 'integer':
+      return field.default;
+    case 'boolean':
+      return field.default;
+    case 'multiselect':
+      return field.default ?? [];
+    case 'unsupported':
+      return undefined;
+  }
+}
+
+function ElicitationField({ field, value, onChange }: {
+  field: AcpElicitationField;
+  value: string | number | boolean | string[] | undefined;
+  onChange: (value: string | number | boolean | string[]) => void;
+}) {
+  const { t } = useI18n();
+  const label = (
+    <span className="elicit-label">
+      {field.title}
+      {field.required && <span className="elicit-required" title={t('elicit.required')}>*</span>}
+    </span>
+  );
+
+  if (field.type === 'unsupported') {
+    return (
+      <div className="elicit-field">
+        {label}
+        <p className="elicit-unsupported">{t('elicit.unsupported', { type: field.propertyType })}</p>
+      </div>
+    );
+  }
+
+  if (field.type === 'boolean') {
+    return (
+      <label className="elicit-field elicit-field--check">
+        <input
+          type="checkbox"
+          checked={value === true}
+          onChange={(e) => onChange(e.target.checked)}
+        />
+        {label}
+      </label>
+    );
+  }
+
+  if (field.type === 'multiselect') {
+    const selected = Array.isArray(value) ? value : [];
+    return (
+      <div className="elicit-field">
+        {label}
+        <div className="elicit-multiselect">
+          {field.options.map((option) => (
+            <label key={option.value} className="elicit-field--check elicit-choice">
+              <input
+                type="checkbox"
+                checked={selected.includes(option.value)}
+                onChange={(e) =>
+                  onChange(
+                    e.target.checked
+                      ? [...selected, option.value]
+                      : selected.filter((entry) => entry !== option.value),
+                  )
+                }
+              />
+              {option.label}
+            </label>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (field.type === 'string' && field.options) {
+    return (
+      <div className="elicit-field">
+        {label}
+        <Selector
+          label={field.title}
+          isLabelHidden
+          value={typeof value === 'string' ? value : ''}
+          onChange={(next) => onChange(next)}
+          options={field.options.map((option) => ({ value: option.value, label: option.label }))}
+        />
+      </div>
+    );
+  }
+
+  if (field.type === 'number' || field.type === 'integer') {
+    const raw = value === undefined || value === '' ? '' : String(value);
+    return (
+      <div className="elicit-field">
+        {label}
+        <TextInput
+          className="elicit-input"
+          label={field.title}
+          isLabelHidden
+          width="100%"
+          value={raw}
+          onChange={(next) => onChange(next)}
+          placeholder={field.type === 'integer' ? t('elicit.placeholderInteger') : t('elicit.placeholderNumber')}
+        />
+      </div>
+    );
+  }
+
+  // Free text.
+  return (
+    <div className="elicit-field">
+      {label}
+      <TextInput
+        className="elicit-input"
+        label={field.title}
+        isLabelHidden
+        width="100%"
+        value={typeof value === 'string' ? value : ''}
+        onChange={(next) => onChange(next)}
+      />
+    </div>
+  );
+}
+
+function SettledElicitationCard({ elicitation }: { elicitation: { request: FormRequest; response: ElicitationResponse | null } }) {
+  const { t } = useI18n();
+  const response = elicitation.response;
+  const summary = !response
+    ? t('elicit.done') // url-completed shape; a form settle always carries a response
+    : response.outcome === 'accepted'
+      ? t('elicit.submitted', { n: Object.keys(response.content).length })
+      : response.outcome === 'declined'
+        ? t('elicit.declined')
+        : t('elicit.cancelled');
+  return (
+    <div className="elicit-card elicit-card--settled">
+      <div className="elicit-head elicit-head--settled">
+        <CircleCheckBig size={14} />
+        {elicitation.request.title ?? t('elicit.title')} · {summary}
+      </div>
+    </div>
+  );
+}

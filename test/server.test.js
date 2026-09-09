@@ -9,7 +9,13 @@ import { cleanupHome, tempHome } from './helpers.js'
 
 const home = tempHome()
 const logger = createLogger(ensureDataLayout(home).logs)
-const server = createBaizeServer({ logger })
+const registry = {
+  list: async () => [
+    { name: 'svc', path: '/x/svc', status: 'ready', stats: { nodes: 6, edges: 9 } },
+  ],
+  add: async () => {},
+}
+const server = createBaizeServer({ logger, registry })
 const bound = await listen(server, { port: 0 })
 const base = `http://${bound.host}:${bound.port}`
 after(async () => {
@@ -34,6 +40,35 @@ test('GET /api/health reports ok', async () => {
   const res = await fetch(new URL('/api/health', base))
   assert.equal(res.status, 200)
   assert.deepEqual(await res.json(), { status: 'ok' })
+})
+
+test('GET /api/repos lists registry state', async () => {
+  const res = await fetch(new URL('/api/repos', base))
+  assert.equal(res.status, 200)
+  const body = await res.json()
+  assert.equal(body.repos.length, 1)
+  assert.equal(body.repos[0].name, 'svc')
+  assert.equal(body.repos[0].stats.nodes, 6)
+})
+
+test('POST /api/repos without a path is a 400', async () => {
+  const res = await fetch(new URL('/api/repos', base), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  assert.equal(res.status, 400)
+  assert.match((await res.json()).error, /path/)
+})
+
+test('POST /api/repos with invalid JSON body is a 400', async () => {
+  const res = await fetch(new URL('/api/repos', base), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{nope',
+  })
+  assert.equal(res.status, 400)
+  assert.match((await res.json()).error, /JSON/)
 })
 
 test('unknown paths get a JSON 404', async () => {

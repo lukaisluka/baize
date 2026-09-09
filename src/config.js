@@ -11,6 +11,7 @@ export const DEFAULT_CONFIG = Object.freeze({
   agentCommand: 'omp',
   gitlab: { baseUrl: null, token: null },
   repos: {},
+  mirrors: {},
 })
 
 function copyDefaults() {

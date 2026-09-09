@@ -26,12 +26,20 @@ export class GitLabError extends Error {
 export function normalizeBaseUrl(raw) {
   let url = String(raw ?? '').trim()
   if (!url) throw new GitLabError('GitLab base URL is required', 'GITLAB_BAD_REQUEST', 400)
-  if (!/^https?:\/\//i.test(url)) url = `https://${url}`
+  // Only prefix when there is no scheme at all — a non-http(s) scheme must be
+  // rejected below, not silently mangled into "https://ftp://…".
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) url = `https://${url}`
   let parsed
   try {
     parsed = new URL(url)
   } catch {
     throw new GitLabError(`invalid GitLab base URL: ${raw}`, 'GITLAB_BAD_REQUEST', 400)
+  }
+  if (!/^https?:$/.test(parsed.protocol)) {
+    throw new GitLabError(`GitLab base URL must be http(s): ${raw}`, 'GITLAB_BAD_REQUEST', 400)
+  }
+  if (parsed.username || parsed.password) {
+    throw new GitLabError('GitLab base URL must not carry user:password credentials', 'GITLAB_BAD_REQUEST', 400)
   }
   parsed.pathname = parsed.pathname.replace(/\/+$/, '').replace(/\/api\/v4$/i, '')
   parsed.search = ''
@@ -43,10 +51,10 @@ function encodePathSegment(segment) {
   return encodeURIComponent(String(segment).replace(/^\/+|\/+$/g, ''))
 }
 
-// '<url>; rel="next", <url>; rel="first"' — the next page URL or null.
+// <url>; rel="next", <url>; rel="first" — the next page URL or null.
 function nextLink(linkHeader) {
   if (!linkHeader) return null
-  for (const part of linkHeader.split(',')) {
+  for (const part of linkHeader.split(/,(?=\s*<)/)) {
     const match = /<([^>]+)>;\s*rel="next"/.exec(part)
     if (match) return match[1]
   }
@@ -55,6 +63,11 @@ function nextLink(linkHeader) {
 
 export function createGitLabClient({ baseUrl, token, fetchImpl = fetch, logger }) {
   const root = normalizeBaseUrl(baseUrl)
+  // Defense in depth for the §7.2 hard rule: whatever an error says, the
+  // token must not survive into logs or API bodies. undici quotes invalid
+  // header values verbatim in TypeError messages, so a hand-edited config
+  // with a malformed token would otherwise leak it (found in review).
+  const sanitize = (message) => String(message).split(String(token)).join('***')
 
   // One request + one error vocabulary for every call site. Logs never carry
   // the token: only the path and the HTTP status.
@@ -65,14 +78,17 @@ export function createGitLabClient({ baseUrl, token, fetchImpl = fetch, logger }
         headers: token ? { 'PRIVATE-TOKEN': token } : {},
       })
     } catch (err) {
-      logger?.warn(`gitlab: request to ${path.split('?')[0]} failed: ${err.message}`)
-      throw new GitLabError(`GitLab is unreachable: ${err.message}`, 'GITLAB_UNREACHABLE', 502)
+      const message = sanitize(err.message)
+      logger?.warn(`gitlab: request to ${path.split('?')[0]} failed: ${message}`)
+      throw new GitLabError(`GitLab is unreachable: ${message}`, 'GITLAB_UNREACHABLE', 502)
     }
     if (response.ok) return response
     const status = response.status
     logger?.warn(`gitlab: ${path.split('?')[0]} -> ${status}`)
     if (status === 401) throw new GitLabError('GitLab rejected the token (401)', 'GITLAB_UNAUTHORIZED', 401)
-    if (status === 403) throw new GitLabError('GitLab denied access (403) — check token scopes', 'GITLAB_FORBIDDEN', 402)
+    // 403, not 402: it is what GitLab meant, and `code: GITLAB_FORBIDDEN`
+    // already distinguishes it from this server's own Host-guard 403.
+    if (status === 403) throw new GitLabError('GitLab denied access (403) — check token scopes', 'GITLAB_FORBIDDEN', 403)
     if (status === 404) throw new GitLabError(`GitLab reports not found: ${path.split('?')[0]}`, 'GITLAB_NOT_FOUND', 404)
     throw new GitLabError(`GitLab API error ${status} on ${path.split('?')[0]}`, 'GITLAB_API_ERROR', 502)
   }
@@ -86,6 +102,9 @@ export function createGitLabClient({ baseUrl, token, fetchImpl = fetch, logger }
     for (let page = 0; page < MAX_PAGES; page += 1) {
       const response = await request(query)
       const batch = await response.json()
+      if (!Array.isArray(batch)) {
+        throw new GitLabError('GitLab returned a non-list response (proxy or HTML page?)', 'GITLAB_API_ERROR', 502)
+      }
       items.push(...batch)
       const next = nextLink(response.headers.get('link'))
       if (!next || batch.length === 0) return items
@@ -114,8 +133,9 @@ export function createGitLabClient({ baseUrl, token, fetchImpl = fetch, logger }
       return { username: user.username }
     },
     async discoverGroup(groupPath) {
-      if (!groupPath?.trim()) throw new GitLabError('group path is required', 'GITLAB_BAD_REQUEST', 400)
-      const projects = await paged(`/groups/${encodePathSegment(groupPath)}/projects?include_subgroups=true`)
+      const group = String(groupPath ?? '').trim()
+      if (!group) throw new GitLabError('group path is required', 'GITLAB_BAD_REQUEST', 400)
+      const projects = await paged(`/groups/${encodePathSegment(group)}/projects?include_subgroups=true`)
       return { repos: projects.map(toRepo) }
     },
     async resolveRepos(paths) {
@@ -155,6 +175,15 @@ function validSelection(selection) {
   return undefined
 }
 
+// GitLab PATs are plain printable ASCII; anything else (pasted multi-line
+// content, control characters) would only explode later as an invalid header
+// value — potentially quoting the credential back through error messages —
+// so reject it here, at the door (review P0: malformed PAT leak).
+function validToken(token) {
+  return typeof token === 'string' && token.length > 0 && token.length <= 255 &&
+    /^[\x21-\x7E]+$/.test(token)
+}
+
 // Settings + discovery over config.json. The token never echoes back to the
 // API surface — the UI learns only whether one is stored (hasToken).
 export function createGitLabService({ config, save, logger, fetchImpl }) {
@@ -177,6 +206,13 @@ export function createGitLabService({ config, save, logger, fetchImpl }) {
     },
     saveSettings({ baseUrl, token, selection }) {
       const normalized = normalizeBaseUrl(baseUrl)
+      if (token !== undefined && token !== '' && !validToken(token)) {
+        throw new GitLabError(
+          'token must be non-empty printable ASCII (max 255 chars) — multi-line or control-character pastes are rejected',
+          'GITLAB_BAD_REQUEST',
+          400,
+        )
+      }
       const picked = validSelection(selection)
       if (selection !== undefined && picked === undefined) {
         throw new GitLabError(
@@ -185,13 +221,14 @@ export function createGitLabService({ config, save, logger, fetchImpl }) {
           400,
         )
       }
-      const tokenChanged = Boolean(token)
+      const tokenChanged = validToken(token ?? '')
       config.gitlab = {
         baseUrl: normalized,
         // Empty/missing token keeps the stored one — the UI never receives it
         // back, so "leave the field blank" must not wipe the credential.
         token: token ? String(token) : config.gitlab?.token ?? null,
-        selection: picked ?? config.gitlab?.selection ?? null,
+        // Absent field keeps the stored selection; explicit null clears it.
+        selection: selection === undefined ? config.gitlab?.selection ?? null : picked,
       }
       save()
       logger?.info(`gitlab: settings saved (baseUrl ${normalized}, token ${tokenChanged ? 'updated' : 'unchanged'})`)

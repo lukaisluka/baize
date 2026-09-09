@@ -55,6 +55,9 @@ function startFakeGitLab() {
       const next = batch.length === 2 ? `<${url.pathname}?pagination=keyset&order_by=id&sort=asc&per_page=2&id_after=${batch[1].id}>; rel="next"` : null
       return json(batch, next ? { link: `${next}, <${url.pathname}?per_page=2>; rel="first"` } : {})
     }
+    if (url.pathname === '/api/v4/groups/weird/projects') {
+      return json({ not: 'a list' })
+    }
     const projectMatch = /^\/api\/v4\/projects\/(.+)$/.exec(url.pathname)
     if (projectMatch) {
       const path = decodeURIComponent(projectMatch[1])
@@ -100,6 +103,11 @@ describe('gitlab client against a fake self-hosted instance', () => {
     assert.deepEqual(await client.verifyToken(), { username: 'luka' })
   })
 
+  test('rejects non-http(s) schemes and embedded credentials', () => {
+    assert.throws(() => normalizeBaseUrl('ftp://gitlab.example.com'), GitLabError)
+    assert.throws(() => normalizeBaseUrl('https://user:pass@gitlab.example.com'), GitLabError)
+  })
+
   test('group discovery follows keyset pagination across pages', async () => {
     const { repos } = await client.discoverGroup('grp')
     assert.equal(repos.length, 3)
@@ -107,6 +115,52 @@ describe('gitlab client against a fake self-hosted instance', () => {
     assert.equal(repos[0].defaultBranch, 'main')
     // Recursion is delegated to the API via include_subgroups=true.
     assert.ok(fake.requests.some((r) => r.path === '/api/v4/groups/grp/projects' && r.query.get('include_subgroups') === 'true'))
+  })
+
+  test('group discovery trims surrounding whitespace before encoding', async () => {
+    const { repos } = await client.discoverGroup('  grp  ')
+    assert.equal(repos.length, 3)
+  })
+
+  test('a non-list response from the API is a GITLAB_API_ERROR, not a crash', async () => {
+    await assert.rejects(() => client.discoverGroup('weird'), (err) => {
+      assert.equal(err.code, 'GITLAB_API_ERROR')
+      assert.equal(err.statusCode, 502)
+      return true
+    })
+  })
+
+  test('GitLab 403 maps to HTTP 403 with GITLAB_FORBIDDEN', async () => {
+    // The fake server has no 403 route; exercise via a client whose fetchImpl
+    // manufactures one.
+    const forbidden = createGitLabClient({
+      baseUrl: client.baseUrl,
+      token: PAT,
+      logger,
+      fetchImpl: async () => new Response('{"message":"403 Forbidden"}', { status: 403 }),
+    })
+    await assert.rejects(() => forbidden.verifyToken(), (err) => {
+      assert.equal(err.code, 'GITLAB_FORBIDDEN')
+      assert.equal(err.statusCode, 403)
+      return true
+    })
+  })
+
+  test('a malformed token (e.g. multi-line paste) never reaches logs or error bodies', async () => {
+    // Review P0 regression: undici quotes invalid header values verbatim in
+    // TypeError messages; the client must sanitize them.
+    const badToken = 'glpat-REVIEW-SECRET-TOKEN-xyz\nSECOND-LINE'
+    const badLogger = capturingLogger()
+    const bad = createGitLabClient({ baseUrl: client.baseUrl, token: badToken, logger: badLogger })
+    await assert.rejects(() => bad.verifyToken(), (err) => {
+      assert.ok(!err.message.includes('SECOND-LINE'), `token leaked in error: ${err.message}`)
+      assert.ok(!err.message.includes('glpat-REVIEW-SECRET'), `token leaked in error: ${err.message}`)
+      return true
+    })
+    for (const line of badLogger.lines) {
+      assert.ok(!line.includes('SECOND-LINE'), `token leaked into log: ${line}`)
+      assert.ok(!line.includes('glpat-REVIEW-SECRET'), `token leaked into log: ${line}`)
+    }
   })
 
   test('explicit repo list resolves, reporting missing entries', async () => {
@@ -181,6 +235,32 @@ describe('gitlab service over config.json', () => {
     assert.throws(() => service.saveSettings({ baseUrl: 'g.example.com', selection: { type: 'repos', repos: [] } }), GitLabError)
     assert.throws(() => service.saveSettings({ baseUrl: 'g.example.com', selection: 'grp' }), GitLabError)
     cleanupHome(home2)
+  })
+
+  test('malformed tokens are rejected at save time (review P0: multi-line paste)', () => {
+    const home4 = tempHome()
+    const config = loadConfig(home4)
+    const service = createGitLabService({ config, save: () => saveConfig(home4, config), logger: capturingLogger() })
+    for (const bad of ['glpat-real\nsecond-line', 'glpat-tab\there', 'x'.repeat(256)]) {
+      assert.throws(() => service.saveSettings({ baseUrl: 'g.example.com', token: bad }), (err) => {
+        assert.equal(err.statusCode, 400)
+        return true
+      })
+    }
+    assert.equal(config.gitlab.token, null, 'no malformed token may be stored')
+    cleanupHome(home4)
+  })
+
+  test('selection: absent keeps the stored value, explicit null clears it', () => {
+    const home5 = tempHome()
+    const config = loadConfig(home5)
+    const service = createGitLabService({ config, save: () => {}, logger: capturingLogger() })
+    service.saveSettings({ baseUrl: 'g.example.com', token: PAT, selection: { type: 'group', path: 'grp' } })
+    service.saveSettings({ baseUrl: 'g.example.com' }) // absent selection keeps
+    assert.equal(service.getSettings().selection?.path, 'grp')
+    service.saveSettings({ baseUrl: 'g.example.com', selection: null }) // null clears
+    assert.equal(service.getSettings().selection, null)
+    cleanupHome(home5)
   })
 
   test('discover before configuration is a 409 GITLAB_NOT_CONFIGURED', () => {

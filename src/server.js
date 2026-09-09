@@ -420,6 +420,13 @@ async function handleApi(req, res, path, { registry, gitlab }) {
   }
 
   if (req.method === 'POST' && path === '/api/gitlab/verify') {
+    // Same content-type gate as the other writes: a hostile page must not be
+    // able to trigger PAT-authenticated requests via a no-preflight form POST.
+    const contentType = req.headers['content-type'] ?? ''
+    if (!contentType.startsWith('application/json')) {
+      return sendJson(res, 415, { error: 'content-type must be application/json' })
+    }
+    await readJsonBody(req) // drain
     return sendJson(res, 200, await gitlab.verify())
   }
 

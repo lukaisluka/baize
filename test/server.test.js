@@ -215,8 +215,14 @@ test('POST /api/gitlab/discover returns repos; a 401 carries its machine code fo
   assert.match(body.error, /token/)
 })
 
-test('POST /api/gitlab/verify reports the authenticated user', async () => {
-  const res = await fetch(new URL('/api/gitlab/verify', base), { method: 'POST' })
+test('POST /api/gitlab/verify reports the authenticated user (JSON gate applies)', async () => {
+  const bare = await fetch(new URL('/api/gitlab/verify', base), { method: 'POST' })
+  assert.equal(bare.status, 415, 'verify requires application/json like the other writes')
+
+  const res = await fetch(new URL('/api/gitlab/verify', base), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+  })
   assert.deepEqual(await res.json(), { username: 'luka' })
 })
 

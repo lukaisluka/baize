@@ -69,8 +69,10 @@ export function createSyncEngine({
   now = Date.now,
   validateUrl = isValidRemoteUrl,
   gitTimeoutMs = DEFAULT_GIT_TIMEOUT_MS,
+  onRevision,
 }) {
   const reposDir = join(home, 'repos')
+  const worktreesDir = join(home, 'worktrees')
   const mirrors = new Map() // name -> { status, lastSyncAt?, lastRevision?, error?, backoffAttempt, backoffUntil? }
   const inFlight = new Set()
   const children = new Set() // live git processes — killed on stop()
@@ -154,20 +156,51 @@ export function createSyncEngine({
 
   // `grp/alpha` and `grp-alpha` are distinct GitLab projects but sanitize to
   // the same path — the hash suffix keeps every mirror owned by exactly one
-  // project (P2 collision from the #12 review).
-  function mirrorPath(name) {
+  // project (P2 collision from the #12 review). The mirror and its worktree
+  // share the slug so they are visibly paired on disk.
+  function storageSlug(name) {
     const slug = name.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'repo'
     const hash = createHash('sha1').update(name).digest('hex').slice(0, 8)
-    return join(reposDir, `${slug}-${hash}.git`)
+    return `${slug}-${hash}`
+  }
+
+  function mirrorPath(name) {
+    return join(reposDir, `${storageSlug(name)}.git`)
+  }
+
+  // CBM reads source files from disk — a bare mirror has no checkout (its
+  // only loose files are hook samples). Each mirror therefore materializes a
+  // linked worktree at the tracked revision; the worktree shares the mirror's
+  // object store, so this costs one checkout, not a second clone.
+  function worktreePath(name) {
+    return join(worktreesDir, storageSlug(name))
   }
 
   // A dir that is not a bare clone with an origin remote is crash debris from
-  // a killed clone — `remote update` on it can never succeed, so wipe it.
+  // a killed clone — `remote update` on it can never succeed, so wipe it (and
+  // any worktree that pointed into it).
   async function isHealthyMirror(path) {
     const bare = await git(['rev-parse', '--is-bare-repository'], path)
     if (!bare.ok || bare.stdout.trim() !== 'true') return false
     const remote = await git(['config', '--get', 'remote.origin.url'], path)
     return remote.ok && remote.stdout.trim().length > 0
+  }
+
+  async function updateWorktree(mirror, name, revision) {
+    const wt = worktreePath(name)
+    if (existsSync(wt)) {
+      const checked = await git(['checkout', '-f', '--detach', revision], wt)
+      if (checked.ok) return wt
+      // Not healable in place — dead gitdir (its mirror was rebuilt), a killed
+      // `worktree add`, or a corrupt index. Drop it and re-materialize.
+      rmSync(wt, { recursive: true, force: true })
+    }
+    // Clear the mirror's stale admin entry so `worktree add` can reuse the
+    // basename id; without this a behind-git's-back deletion sticks forever.
+    await git(['worktree', 'prune'], mirror)
+    mkdirSync(worktreesDir, { recursive: true })
+    const added = await git(['worktree', 'add', '--detach', wt, revision], mirror)
+    return added.ok ? wt : null
   }
 
   // Outcomes feed the cycle count: 'ok' synced, 'fail' attempted and failed
@@ -190,6 +223,7 @@ export function createSyncEngine({
       if (exists && !(await isHealthyMirror(path))) {
         logger?.warn(`sync: ${name} mirror is not a valid bare clone — recreating ${path}`)
         rmSync(path, { recursive: true, force: true })
+        rmSync(worktreePath(name), { recursive: true, force: true })
         exists = false
       }
       setState(name, { status: exists ? 'fetching' : 'cloning' })
@@ -211,6 +245,22 @@ export function createSyncEngine({
       if (result.ok) {
         const branch = config.mirrors?.[name]?.branch
         const revision = await headRevision(path, branch)
+        const previous = stateOf(name).lastRevision
+        // The indexable checkout follows the tracked revision. A failure here
+        // fails the repo (not just the index): without a current worktree the
+        // pipeline cannot advance.
+        const wt = revision ? await updateWorktree(path, name, revision) : null
+        if (revision && !wt) {
+          const attempt = stateOf(name).backoffAttempt + 1
+          setState(name, {
+            status: 'error',
+            error: `failed to materialize index worktree at ${revision.slice(0, 10)}`,
+            backoffAttempt: attempt,
+            backoffUntil: now() + backoffMs(attempt),
+          })
+          logger?.warn(`sync: ${name} worktree update failed, backing off`)
+          return 'fail'
+        }
         setState(name, {
           status: 'idle',
           lastSyncAt: now(),
@@ -220,6 +270,11 @@ export function createSyncEngine({
           backoffUntil: null,
         })
         logger?.info(`sync: ${name} ${exists ? 'fetched' : 'cloned'} @ ${revision ?? 'unknown'}`)
+        // The loop-closing hook (#13): a revision change on the mirror means
+        // the index is stale — hand the WORKTREE path (the readable checkout)
+        // to the registry for an incremental re-index. Fires on first clone
+        // and on branch-override switches too.
+        if (revision && wt && revision !== previous) onRevision?.(name, revision, wt)
         return 'ok'
       }
 
@@ -375,6 +430,7 @@ export function createSyncEngine({
     // What the poll timer runs: same cycle, but respects backoff windows.
     pollCycle: () => enqueue(() => runCycle()),
     mirrorPathOf: mirrorPath,
+    worktreePathOf: worktreePath,
     start() {
       if (started) return
       started = true
@@ -390,10 +446,11 @@ export function createSyncEngine({
     async stop() {
       if (timer) clearInterval(timer)
       started = false
-      // In-flight git processes own files under ~/.baize/repos/ and hold the
-      // queue open; kill their whole process group so shutdown is immediate.
-      // A killed clone leaves at most a half-mirror, which the next sync
-      // detects and recreates.
+      // In-flight git processes own files under ~/.baize/repos/ and worktrees/
+      // and hold the queue open; kill their whole process group so shutdown is
+      // immediate. A killed clone leaves at most a half-mirror — the next sync
+      // detects and recreates it, and updateWorktree re-materializes debris
+      // worktrees the same way.
       for (const child of children) killTree(child)
       await queue.catch(() => {})
     },

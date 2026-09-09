@@ -34,7 +34,23 @@ export async function startApp({
   const cbm = new CbmSupervisor({ cacheDir: dirs.index, logger })
   const registry = createRepoRegistry({ config, save: () => saveConfig(home, config), logger, cbm })
   const gitlab = createGitLabService({ config, save: () => saveConfig(home, config), logger })
-  const sync = createSyncEngine({ home, config, save: () => saveConfig(home, config), gitlab, logger })
+  // The #13 loop: sync lands a mirror on a new revision -> registry kicks an
+  // incremental CBM index for it. Errors here must never take the sync cycle
+  // down — they are logged and the next revision retries.
+  const sync = createSyncEngine({
+    home,
+    config,
+    save: () => saveConfig(home, config),
+    gitlab,
+    logger,
+    onRevision: (name, revision, path) => {
+      try {
+        registry.ensureFleetRepo(name, path, revision)
+      } catch (err) {
+        logger.error(`fleet: registering mirror ${name} for indexing failed: ${err.message}`)
+      }
+    },
+  })
   sync.start()
 
   const server = createBaizeServer({ logger, registry, gitlab, sync, uiDist })
@@ -75,6 +91,7 @@ export async function startApp({
       const closed = close(server)
       await bridge.stop()
       await sync.stop()
+      registry.stop()
       await closed
       await cbm.stop()
     },

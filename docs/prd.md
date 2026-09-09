@@ -110,7 +110,7 @@ baize CLI — single Node.js process (`npx baize`), binds 127.0.0.1 only
    |-- spawns OMP (ACP over stdio)
    |       `-- MCP (stdio) --> CBM child process
    `-- fleet worker: scheduled poll + manual sync via system git
-           `-- ~/.baize/repos/ (bare mirrors) --> CBM index (~/.baize/index/)
+           `-- ~/.baize/repos/ (bare mirrors) --worktree--> ~/.baize/worktrees/ (checkouts) --> CBM index (~/.baize/index/)
 ```
 
 ### 6.1 Component responsibilities
@@ -162,6 +162,7 @@ baize CLI — single Node.js process (`npx baize`), binds 127.0.0.1 only
 ├── omp-overlay.yml  # OMP telemetry opt-out, written once by baize (editable)
 ├── agent/           # working directory for spawned agent processes
 ├── repos/           # bare mirror clones
+├── worktrees/       # linked worktrees at tracked revisions — what CBM indexes
 ├── index/           # CBM data
 └── logs/
 ```
@@ -222,8 +223,16 @@ Fleet is part of the MVP, scoped down to a single-user GitLab deployment. The en
 
 ### 7.4 Mirror layout
 
-- **Bare mirrors** under `~/.baize/repos/`, no worktrees.
-- Consequence: "open in local IDE" deep links are out of scope for V0.1.
+- **Bare mirrors** under `~/.baize/repos/` (no full clones). Each mirror
+  materializes a **linked worktree** at the tracked revision under
+  `~/.baize/worktrees/` (shared object store — one checkout, not a second
+  clone). The worktree is what CBM indexes: CBM reads source files from disk
+  and cannot index by git ref, and a bare mirror's only loose files are hook
+  samples (verified in #13 — indexing a bare mirror yields zero code
+  symbols). Worktrees are updated (or re-materialized, if debris) on every
+  successful sync; branch overrides move them too.
+- Consequence: "open in local IDE" deep links stay out of scope for V0.1 —
+  the worktree is engine-internal and detached, not a user workspace.
 
 ### 7.5 Synchronization
 
@@ -523,6 +532,10 @@ CBM is primarily a local MCP/code-memory engine (per-account daemon, no network 
 ### SQLite concurrency / WAL growth
 
 Concrete upstream evidence: #1083 (WAL grew to 115 GB in 4.5 h under concurrent index workers), #1174 (stuck/oversized WAL on Windows), #1206 (multi-instance DB quarantine contention). _Mitigation_: bound indexing concurrency, own the daemon lifecycle from the baize CLI, apply CBM's WAL size bounds, run the Phase 0 soak (§17 item 8), benchmark at each scale milestone.
+
+### CBM daemon is a per-account global singleton (new, #13)
+
+The daemon binds to the first-seen `CBM_CACHE_DIR` for the active account; a second CBM session started with a *different* cache dir exits immediately ("active account daemon uses a different cache directory"). Orphaned sessions (e.g. an unclean shutdown) keep the daemon committed and block other cache dirs until reaped. _Mitigation_: one baize home per machine/account (the Personal-form deployment model); the supervisor kills the daemon on shutdown (`daemon stop` fallback reaps leftovers); the failure surfaces as an actionable error instead of a hang.
 
 ### Cross-repository graph quality
 

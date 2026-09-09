@@ -28,12 +28,19 @@ The process binds 127.0.0.1 only and runs in the foreground; Ctrl-C stops it.
   WebSocket to `/acp` on this server. Each WebSocket connection spawns one
   agent child process; the bridge frames WebSocket messages to stdio
   JSON-RPC lines and back. Closing the tab terminates the agent.
-- **`/fleet`** — GitLab connection + repo discovery + mirror sync. Paste your
+- **`/fleet`** — GitLab connection + repo discovery + mirror sync + indexing.
+  Paste your
   GitLab base URL and a PAT (`read_api` scope is enough), then discover a
   group recursively or an explicit repo list. Discovered repos clone as bare
   mirrors under `~/.baize/repos/` and stay current via polling (default 15m)
   plus manual **Sync now** (globally or per repo); per-repo branch overrides
-  pin the tracked branch. Cloning uses system git with your ambient
+  pin the tracked branch. Each mirror materializes a linked worktree at the
+  tracked revision under `~/.baize/worktrees/` — the readable checkout the
+  code index is built from (the bare mirror itself has no working tree).
+  Every tracked-revision change re-indexes that repo automatically (same
+  revision = no-op, failures retry with exponential backoff); the fleet table
+  shows index state and the last indexed revision. Cloning uses system git
+  with your ambient
   credentials (SSH agent / credential helper) — the PAT is never embedded in
   a remote URL, and remote URLs returned by discovery are allowlisted to
   https/ssh/git transports (no `ext::`, no local paths). Git authentication
@@ -98,6 +105,7 @@ All state lives under `~/.baize/` (override with `BAIZE_HOME`):
 ├── omp-overlay.yml  # OMP telemetry opt-out, written once by baize (editable)
 ├── agent/           # working directory for spawned agent processes
 ├── repos/           # bare mirror clones kept current by fleet sync
+├── worktrees/       # linked worktrees at tracked revisions — what gets indexed
 ├── index/           # CBM data (per-project SQLite DBs)
 └── logs/            # baize.log — startup, requests, CBM/agent lifecycle, shutdown
 ```

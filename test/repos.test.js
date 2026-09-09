@@ -15,11 +15,11 @@ function gitFixture(dir) {
   return dir
 }
 
-function makeRegistry(home) {
+function makeRegistry(home, { cbm: cbmOverride, retryDelaysMs } = {}) {
   const config = loadConfig(home)
   const logger = { info: () => {}, warn: () => {}, error: () => {} }
   const calls = []
-  const cbm = {
+  const cbm = cbmOverride ?? {
     call: async (tool, args) => {
       calls.push({ tool, args })
       if (tool === 'index_repository') return { nodes: 6, edges: 9, status: 'indexed' }
@@ -27,11 +27,26 @@ function makeRegistry(home) {
       throw new Error(`unexpected tool ${tool}`)
     },
   }
-  const registry = createRepoRegistry({ config, save: () => saveConfig(home, config), logger, cbm })
+  const registry = createRepoRegistry({
+    config,
+    save: () => saveConfig(home, config),
+    logger,
+    cbm,
+    ...(retryDelaysMs ? { retryDelaysMs } : {}),
+  })
   return { registry, config, calls }
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5))
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+async function waitFor(predicate, { timeoutMs = 10000 } = {}) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await predicate()) return
+    await sleep(20)
+  }
+  throw new Error('waitFor: condition not met within timeout')
+}
 
 test('add(): validates git repo, slugs the name, persists, kicks index', async () => {
   const home = tempHome()
@@ -178,12 +193,159 @@ test('index failure is captured as status=error with the message', async () => {
         throw new Error('unexpected')
       },
     }
-    const registry = createRepoRegistry({ config, save: () => {}, logger, cbm })
+    const registry = createRepoRegistry({ config, save: () => {}, logger, cbm, retryDelaysMs: [60_000_000] })
     registry.add(gitFixture(join(home, 'svc')))
     await tick()
     const [repo] = await registry.list()
     assert.equal(repo.status, 'error')
     assert.match(repo.error, /boom/)
+    assert.ok(repo.retryAt, 'a retry is scheduled')
+    registry.stop()
+  } finally {
+    cleanupHome(home)
+  }
+})
+
+test('fleet mirror: registered under its GitLab name and indexed with the revision', async () => {
+  const home = tempHome()
+  try {
+    const { registry, config, calls } = makeRegistry(home)
+    registry.ensureFleetRepo('grp/alpha', join(home, 'repos', 'grp-alpha-1a2b3c4d.git'), 'a'.repeat(40))
+    await tick()
+    assert.equal(config.repos['grp/alpha'].mirror, true)
+    assert.equal(config.repos['grp/alpha'].lastIndexedRevision, 'a'.repeat(40), 'indexed revision persisted')
+    assert.deepEqual(
+      calls.find((c) => c.tool === 'index_repository')?.args,
+      { repo_path: join(home, 'repos', 'grp-alpha-1a2b3c4d.git'), name: 'grp/alpha' },
+    )
+    // survives on disk
+    const persisted = JSON.parse(readFileSync(join(home, 'config.json'), 'utf8'))
+    assert.equal(persisted.repos['grp/alpha'].lastIndexedRevision, 'a'.repeat(40))
+  } finally {
+    cleanupHome(home)
+  }
+})
+
+test('fleet mirror: same revision is idempotent, a new revision re-indexes', async () => {
+  const home = tempHome()
+  try {
+    const { registry, calls } = makeRegistry(home)
+    registry.ensureFleetRepo('grp/alpha', join(home, 'm.git'), 'a'.repeat(40))
+    await tick()
+    registry.ensureFleetRepo('grp/alpha', join(home, 'm.git'), 'a'.repeat(40)) // no-op
+    await tick()
+    assert.equal(calls.filter((c) => c.tool === 'index_repository').length, 1)
+
+    registry.ensureFleetRepo('grp/alpha', join(home, 'm.git'), 'b'.repeat(40)) // new revision
+    await tick()
+    assert.equal(calls.filter((c) => c.tool === 'index_repository').length, 2)
+  } finally {
+    cleanupHome(home)
+  }
+})
+
+test('fleet mirror: name clash with a manual repo resolves to a suffix, not a takeover', async () => {
+  const home = tempHome()
+  try {
+    const { registry, config } = makeRegistry(home)
+    // A top-level GitLab project can be literally named "alpha", the same as
+    // a slugified manual repo — the manual entry must keep the name.
+    registry.add(gitFixture(join(home, 'alpha')))
+    registry.ensureFleetRepo('alpha', join(home, 'mirror.git'), 'a'.repeat(40))
+    await tick()
+    assert.equal(config.repos['alpha'].mirror, undefined, 'manual entry untouched')
+    assert.equal(config.repos['alpha-2'].mirror, true, 'fleet repo suffixed')
+  } finally {
+    cleanupHome(home)
+  }
+})
+
+test('fleet mirror: failed index retries with the newest revision it saw', async () => {
+  const home = tempHome()
+  try {
+    let fail = true
+    const calls = []
+    const cbm = {
+      call: async (tool, args) => {
+        calls.push({ tool, args })
+        if (tool === 'index_repository') {
+          if (fail) throw new Error('index_repository: daemon wedged')
+          return { nodes: 1, edges: 2 }
+        }
+        throw new Error(`unexpected tool ${tool}`)
+      },
+    }
+    const { registry, config } = makeRegistry(home, { cbm, retryDelaysMs: [15, 15] })
+    registry.ensureFleetRepo('grp/flaky', join(home, 'm.git'), 'a'.repeat(40))
+    await waitFor(() => registry.list().then(() => config.repos['grp/flaky'] !== undefined))
+    // First attempt failed while revision 'b' landed: the retry must target
+    // the newest revision, not the one that failed.
+    registry.ensureFleetRepo('grp/flaky', join(home, 'm.git'), 'b'.repeat(40))
+    await waitFor(() => calls.filter((c) => c.tool === 'index_repository').length >= 1)
+    fail = false
+    await waitFor(async () => (await registry.list()).find((r) => r.name === 'grp/flaky')?.status === 'ready')
+    const indexCalls = calls.filter((c) => c.tool === 'index_repository')
+    assert.ok(indexCalls.length >= 2, 'at least one retry fired')
+    assert.equal(config.repos['grp/flaky'].lastIndexedRevision, 'b'.repeat(40), 'retry indexed the newest revision')
+    registry.stop()
+  } finally {
+    cleanupHome(home)
+  }
+})
+
+test('a revision arriving mid-run re-indexes on completion instead of being dropped', async () => {
+  const home = tempHome()
+  try {
+    let release
+    const gate = new Promise((resolve) => (release = resolve))
+    const calls = []
+    const cbm = {
+      call: async (tool, args) => {
+        calls.push({ tool, args })
+        if (tool === 'index_repository') {
+          await gate
+          return { nodes: 1, edges: 1 }
+        }
+        return { nodes: 1, edges: 1, status: 'ready' }
+      },
+    }
+    const { registry, config } = makeRegistry(home, { cbm })
+    registry.ensureFleetRepo('grp/alpha', join(home, 'm.git'), 'a'.repeat(40)) // starts run on 'a'
+    registry.ensureFleetRepo('grp/alpha', join(home, 'm.git'), 'b'.repeat(40)) // collapses into the run
+    release()
+    await waitFor(async () => config.repos['grp/alpha'].lastIndexedRevision === 'b'.repeat(40))
+    assert.equal(calls.filter((c) => c.tool === 'index_repository').length, 2, 'completion re-kicked for the newer revision')
+    registry.stop()
+  } finally {
+    cleanupHome(home)
+  }
+})
+
+test('list() stays responsive while an index job runs (query path)', async () => {
+  const home = tempHome()
+  try {
+    let release
+    const gate = new Promise((resolve) => (release = resolve))
+    const cbm = {
+      call: async (tool) => {
+        if (tool === 'index_repository') {
+          await gate // simulate a long-running index
+          return { nodes: 1, edges: 1 }
+        }
+        return { nodes: 1, edges: 1, status: 'ready' }
+      },
+    }
+    const { registry } = makeRegistry(home, { cbm })
+    registry.add(gitFixture(join(home, 'svc')))
+    // list() answers with 'indexing' without waiting for the job to finish.
+    const listed = await Promise.race([
+      registry.list(),
+      sleep(1000).then(() => 'TIMEOUT'),
+    ])
+    assert.notEqual(listed, 'TIMEOUT')
+    assert.equal(listed[0].status, 'indexing')
+    release()
+    registry.stop()
   } finally {
     cleanupHome(home)
   }

@@ -76,7 +76,16 @@ export function createRepoRegistry({
       job.pendingRevision = revision ?? job.pendingRevision
       return job
     }
-    if (job.retryTimer && force) clearTimeout(job.retryTimer)
+    if (job.retryTimer) {
+      clearTimeout(job.retryTimer)
+      job.retryTimer = null
+      job.retryAt = null
+      // The forced run supersedes the scheduled retry — inherit its target.
+      // Dropping it would make the retry-fallback below aim at an
+      // already-indexed revision, which the idempotency guard turns into a
+      // silent no-op: the job would sit in 'error' forever.
+      revision = revision ?? job.pendingRevision
+    }
     if (stopped) return job
     if (!force && revision && entry.lastIndexedRevision === revision) return job
 
@@ -107,7 +116,10 @@ export function createRepoRegistry({
         record.status = 'error'
         record.error = err.message
         logger.error(`repos: indexing ${name} failed: ${err.message}`)
-        scheduleRetry(name, record.latestRevision ?? entry.lastIndexedRevision ?? null, record)
+        // Retry the revision this run targeted — never entry.lastIndexedRevision:
+        // an already-indexed revision is by definition not a valid retry
+        // target (the idempotency guard would swallow it).
+        scheduleRetry(name, record.latestRevision ?? null, record)
       })
     return record
   }
@@ -158,15 +170,19 @@ export function createRepoRegistry({
   // same name wins and the mirror takes a suffix. Called by the sync engine
   // whenever a mirror lands on a revision its index has not seen.
   function ensureFleetRepo(rawName, path, revision) {
+    // Reuse only an entry this project already owns (mirror entry at the
+    // same deterministic worktree path). A suffixed fleet entry can collide
+    // with a real GitLab project of that exact name — re-pointing it would
+    // index one project's tree under another's CBM identity, so a path
+    // mismatch registers fresh under the next free suffix instead.
     let name = rawName
-    const clash = config.repos[name]
-    if (clash && clash.mirror !== true) name = uniqueName(name)
     let entry = config.repos[name]
+    if (entry && (entry.mirror !== true || entry.path !== path)) {
+      name = uniqueName(rawName)
+      entry = config.repos[name]
+    }
     if (!entry) {
-      entry = config.repos[name] = { path, addedAt: new Date().toISOString(), mirror: true }
-      save()
-    } else if (entry.path !== path) {
-      entry.path = path
+      config.repos[name] = { path, addedAt: new Date().toISOString(), mirror: true }
       save()
     }
     if (stopped) return
@@ -205,7 +221,21 @@ export function createRepoRegistry({
       }
     } catch (err) {
       if (/not found or not indexed/.test(err.message)) {
-        return { ...base, status: 'unindexed' }
+        // CBM's index is the truth; the config token must yield. A cleared or
+        // corrupted ~/.baize/index would otherwise pin lastIndexedRevision
+        // forever while this very status honestly says 'unindexed' — and the
+        // idempotency guard would turn every future kick for that revision
+        // into a no-op. Drop the stale token and rebuild the index.
+        const token = entry.lastIndexedRevision
+        if (token) {
+          delete entry.lastIndexedRevision
+          save()
+          if (!stopped) {
+            logger.warn(`repos: ${name} index missing in CBM (config claimed ${token.slice(0, 10)}) — re-indexing`)
+            kickIndex(name, { revision: token })
+          }
+        }
+        return { ...base, lastIndexedRevision: null, status: 'unindexed' }
       }
       return { ...base, status: 'error', error: err.message }
     }

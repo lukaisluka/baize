@@ -345,10 +345,15 @@ async function refreshSync() {
       } catch (err) { syncNotice.textContent = err.message; }
     });
     // The registry's view of this mirror's index (joined from /api/repos).
+    // After a restart describe() can surface CBM's own in-progress wording —
+    // normalize to the chip classes the CSS actually knows.
     const repo = reposCache.find((r) => r.mirror && r.name === name);
+    const rawIndex = repo?.status ?? 'unindexed';
+    const indexStatus = rawIndex === 'ready' || rawIndex === 'unindexed' || rawIndex === 'error'
+      ? rawIndex : rawIndex.includes('progress') || rawIndex.includes('indexing') ? 'indexing' : 'error';
     const indexChip = document.createElement('span');
-    indexChip.className = 'status ' + (repo?.status ?? 'unindexed');
-    indexChip.textContent = repo?.status ?? 'unindexed';
+    indexChip.className = 'status ' + indexStatus;
+    indexChip.textContent = rawIndex;
     if (repo?.error) indexChip.title = repo.error;
     if (repo?.retryAt) indexChip.title = (indexChip.title ? indexChip.title + '\\n' : '') + 'retry scheduled';
     const indexed = document.createElement('span');

@@ -13,6 +13,12 @@ const logger = createLogger(ensureDataLayout(home).logs)
 const registry = {
   list: async () => [
     { name: 'svc', path: '/x/svc', status: 'ready', stats: { nodes: 6, edges: 9 } },
+    {
+      name: 'grp/svc', path: '/wt/grp-svc-1a2b3c4d', addedAt: '2026-01-01T00:00:00Z',
+      mirror: true, status: 'error', error: 'index_repository: boom',
+      lastIndexedRevision: 'a'.repeat(40), retryAt: 1788972045968,
+      stats: { nodes: 1, edges: 1 },
+    },
   ],
   add: () => ({ name: 'new', path: '/x/new' }),
 }
@@ -112,9 +118,15 @@ test('GET /api/repos lists registry state', async () => {
   const res = await fetch(new URL('/api/repos', base))
   assert.equal(res.status, 200)
   const body = await res.json()
-  assert.equal(body.repos.length, 1)
+  assert.equal(body.repos.length, 2)
   assert.equal(body.repos[0].name, 'svc')
   assert.equal(body.repos[0].stats.nodes, 6)
+  // Fleet entries carry the indexing fields the UI table joins on.
+  const mirror = body.repos[1]
+  assert.equal(mirror.mirror, true)
+  assert.equal(mirror.lastIndexedRevision, 'a'.repeat(40))
+  assert.equal(mirror.retryAt, 1788972045968)
+  assert.match(mirror.error, /boom/)
 })
 
 test('POST /api/repos without a path is a 400', async () => {

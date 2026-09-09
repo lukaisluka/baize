@@ -277,7 +277,7 @@ test('fleet mirror: failed index retries with the newest revision it saw', async
     }
     const { registry, config } = makeRegistry(home, { cbm, retryDelaysMs: [15, 15] })
     registry.ensureFleetRepo('grp/flaky', join(home, 'm.git'), 'a'.repeat(40))
-    await waitFor(() => registry.list().then(() => config.repos['grp/flaky'] !== undefined))
+    await waitFor(() => config.repos['grp/flaky'] !== undefined)
     // First attempt failed while revision 'b' landed: the retry must target
     // the newest revision, not the one that failed.
     registry.ensureFleetRepo('grp/flaky', join(home, 'm.git'), 'b'.repeat(40))
@@ -315,6 +315,103 @@ test('a revision arriving mid-run re-indexes on completion instead of being drop
     release()
     await waitFor(async () => config.repos['grp/alpha'].lastIndexedRevision === 'b'.repeat(40))
     assert.equal(calls.filter((c) => c.tool === 'index_repository').length, 2, 'completion re-kicked for the newer revision')
+    registry.stop()
+  } finally {
+    cleanupHome(home)
+  }
+})
+
+test('forced reindex failure does not strand the retry chain (P1 regression)', async () => {
+  const home = tempHome()
+  try {
+    let fail = false
+    const calls = []
+    const cbm = {
+      call: async (tool, args) => {
+        calls.push({ tool, args })
+        if (tool === 'index_repository') {
+          if (fail) throw new Error('index_repository: daemon down')
+          return { nodes: 1, edges: 1 }
+        }
+        throw new Error(`unexpected tool ${tool}`)
+      },
+    }
+    const { registry, config } = makeRegistry(home, { cbm, retryDelaysMs: [15, 15] })
+    const statusOf = async () => (await registry.list()).find((r) => r.name === 'grp/x')?.status
+    registry.ensureFleetRepo('grp/x', join(home, 'm.git'), 'a'.repeat(40))
+    await waitFor(() => config.repos['grp/x'].lastIndexedRevision === 'a'.repeat(40))
+
+    // Revision 'b' lands while CBM is down: kick fails, retry scheduled for 'b'.
+    fail = true
+    registry.ensureFleetRepo('grp/x', join(home, 'm.git'), 'b'.repeat(40))
+    await waitFor(async () => (await statusOf()) === 'error')
+    // A forced reindex supersedes the scheduled retry — it must inherit 'b'
+    // as its target, and its own failure must re-arm the retry for 'b'.
+    registry.reindex('grp/x')
+    await waitFor(async () => (await statusOf()) === 'error')
+
+    fail = false // CBM recovers
+    // The re-scheduled retry must actually run (not collapse into a no-op
+    // against the already-indexed 'a') and bring the index to 'b'.
+    await waitFor(() => config.repos['grp/x'].lastIndexedRevision === 'b'.repeat(40), { timeoutMs: 15000 })
+    assert.equal(await statusOf(), 'ready')
+    registry.stop()
+  } finally {
+    cleanupHome(home)
+  }
+})
+
+test('a stale lastIndexedRevision token yields to a missing CBM index and rebuilds', async () => {
+  const home = tempHome()
+  try {
+    const calls = []
+    const cbm = {
+      call: async (tool, args) => {
+        calls.push({ tool, args })
+        if (tool === 'index_status') throw new Error('index_status: project not found or not indexed')
+        if (tool === 'index_repository') return { nodes: 2, edges: 2 }
+        throw new Error(`unexpected tool ${tool}`)
+      },
+    }
+    const { registry, config } = makeRegistry(home, { cbm })
+    // Restart scenario: config survived, CBM's index dir did not.
+    config.repos = {
+      'grp/ghost': { path: join(home, 'm.git'), addedAt: '2026-01-01T00:00:00Z', mirror: true, lastIndexedRevision: 'a'.repeat(40) },
+    }
+    const [repo] = await registry.list()
+    assert.equal(repo.status, 'unindexed')
+    assert.equal(repo.lastIndexedRevision, null, 'stale token is not reported as truth')
+    // The rebuild was kicked for the stale token's revision.
+    await waitFor(() => calls.some((c) => c.tool === 'index_repository'))
+    assert.deepEqual(calls.find((c) => c.tool === 'index_repository').args, {
+      repo_path: join(home, 'm.git'),
+      name: 'grp/ghost',
+    })
+    // On success the token is re-recorded — from CBM's own result this time,
+    // not from the stale config value.
+    await waitFor(async () => (await registry.list()).find((r) => r.name === 'grp/ghost')?.status === 'ready')
+    assert.equal(config.repos['grp/ghost'].lastIndexedRevision, 'a'.repeat(40))
+    registry.stop()
+  } finally {
+    cleanupHome(home)
+  }
+})
+
+test('fleet mirror: a suffixed entry is never re-pointed to a different project', async () => {
+  const home = tempHome()
+  try {
+    const { registry, config } = makeRegistry(home)
+    registry.add(gitFixture(join(home, 'alpha'))) // manual 'alpha' wins the base name
+    registry.ensureFleetRepo('alpha', join(home, 'wt-alpha'), 'a'.repeat(40)) // fleet → 'alpha-2'
+    await tick()
+    // A real GitLab project literally named alpha-2 shows up later: it must
+    // not hijack (re-point) the existing 'alpha-2' entry — it takes the next
+    // free suffix, and the first project keeps its CBM identity.
+    registry.ensureFleetRepo('alpha-2', join(home, 'wt-alpha-2'), 'c'.repeat(40))
+    await tick()
+    assert.equal(config.repos['alpha-2'].path, join(home, 'wt-alpha'), 'first project keeps its entry')
+    assert.equal(config.repos['alpha-2-2'].path, join(home, 'wt-alpha-2'), 'newcomer suffixed, not re-pointing')
+    assert.equal(config.repos['alpha-2-2'].mirror, true)
     registry.stop()
   } finally {
     cleanupHome(home)

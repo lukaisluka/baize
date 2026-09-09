@@ -29,6 +29,9 @@
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
       }
+    },
+    "resources": {
+      "resources/baize": "baize"
     }
   }
 }

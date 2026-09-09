@@ -43,42 +43,59 @@ cargo build --manifest-path desktop/src-tauri/Cargo.toml
 The packager caches the Node dist archive under `~/.cache/baize-sidecar/`
 (downloads are verified against nodejs.org's published `SHASUMS256.txt`;
 extraction is atomic — a temp dir renamed into place — so an interrupted
-run can't poison the cache); `--node-version vX.Y.Z` (or
-`--node-version=vX.Y.Z`) overrides the default (match-the-running-Node).
+run can't poison the cache, and concurrent runs are safe: temp dirs carry
+the pid, and stale ones from crashed runs are swept on startup);
+`--node-version vX.Y.Z` (or `--node-version=vX.Y.Z`) overrides the default
+(match-the-running-Node).
 
 ### Unbundled release binary
 
-A bare `cargo build --release` binary resolves `resource_dir()` to
-`target/release/`, so it expects `target/release/baize/` (the bundle
-layout: `bin/node`, `src/`, ...). Symlink it to the assembled resources:
+`cargo build --release` is self-sufficient: the build script (tauri-build's
+`copy_resources`, driven by the `bundle.resources` map below) copies the
+assembled tree to `target/release/baize/`, so the bare binary resolves its
+sidecar and runs as-is. Verified: spawn → health gate → group sweep with
+zero survivors.
 
-```sh
-ln -sfn ../../resources/baize desktop/src-tauri/target/release/baize
-```
+> **Never symlink `target/release/baize` to `resources/baize`.** The build
+> script's copy destination *is* `target/release/<map target>`: with that
+> symlink in place, `fs::copy`'s destination resolves back to the source
+> file itself — `File::create` truncates it to 0 bytes, then the copy
+> copies the now-empty file onto itself. No error is raised. tauri-build
+> (2.6.3) does have an "avoid copying if target is the same as source"
+> check, but it canonicalizes only the source path, so the unresolved
+> symlinked destination slips past it. Verified the hard way: one such
+> build silently zeroed 1025 of the 1026 files in the assembled tree. If
+> it happens: `node desktop/scripts/package-sidecar.mjs` rebuilds
+> everything from the pristine repo sources.
 
-### `tauri build` bundles (manual injection — upstream bug)
+### `tauri build` bundles
 
-`bundle.resources` in tauri.conf.json does NOT work for this resource
-tree on the current toolchain (tauri-utils 2.9.3): glob patterns
-(`resources/baize/**` in list or map form) fail with "path not found or
-didn't match any files", and non-glob entries (`resources/baize`,
-`resources/baize/*`) silently copy only the top-level files while
-skipping every directory — `bin/`, `src/`, `node_modules/`, `ui/` never
-make it into the bundle. Verified empirically against all four forms;
-the config key is therefore omitted. Revisit when tauri-utils fixes
-resource-tree copying, then bundle like this:
+`bundle.resources` uses the map form — `{"resources/baize": "baize"}` —
+which `npx @tauri-apps/cli build` copies into the bundle correctly
+(`Contents/Resources/baize/`, full tree including the 120 MB `bin/node`;
+verified end-to-end below). The other forms are broken on the current
+toolchain (tauri-utils 2.9.3): glob patterns (list or map form) fail the
+build with "path not found or didn't match any files", and non-glob
+**list** entries silently copy only top-level files, skipping every
+directory. Dev builds (`cargo build`, debug profile) copy nothing — the
+dev binary resolves resources via `CARGO_MANIFEST_DIR` instead, so the
+packager's output under `src-tauri/resources/` serves it directly.
+
+Tauri signs the produced bundle ad-hoc without entitlements; for a
+hardened-runtime build, re-sign it (see [Signing](#signing-macos-hardened-runtime--jit-entitlements)
+for the mechanics):
 
 ```sh
 npx @tauri-apps/cli build --bundles app        # produces target/release/bundle/macos/BaiZe.app
 APP=desktop/src-tauri/target/release/bundle/macos/BaiZe.app
-cp -R desktop/src-tauri/resources/baize "$APP/Contents/Resources/baize"
 codesign --force --deep --options runtime \
   --entitlements desktop/src-tauri/entitlements.plist --sign - "$APP"
 ```
 
-This manual path is verified end-to-end: the bundled app resolves
-`Contents/Resources/baize/bin/node`, passes the health gate, and sweeps
-its whole process group on quit (see below).
+This path is verified end-to-end: the bundled app resolves
+`Contents/Resources/baize/bin/node`, passes the health gate under the
+hardened runtime with JIT entitlements, and sweeps its whole process
+group on quit (see below).
 
 ## Signing (macOS, hardened runtime + JIT entitlements)
 
@@ -136,6 +153,7 @@ certificate and `notarytool` — out of scope for this feasibility issue.
 
 - `src-tauri/src/main.rs` — the shell (spawn, health gate, window, exit sweep)
 - `src-tauri/entitlements.plist` — hardened-runtime JIT entitlements
-- `src-tauri/tauri.conf.json` — bundle config (icons, dmg/nsis targets)
+- `src-tauri/tauri.conf.json` — bundle config (icons, dmg/nsis targets,
+  `resources` map that ships the sidecar)
 - `scripts/package-sidecar.mjs` — sidecar packager
 - `resources/baize/` — generated by the packager, git-ignored

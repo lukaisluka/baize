@@ -40,6 +40,10 @@ test('loadDataset collects every violation, not just the first', () => {
 test('loadDataset rejects non-JSON and empty question sets', () => {
   assert.throws(() => loadDataset('{nope'), /not valid JSON/)
   assert.throws(() => loadDataset('{"name":"x","questions":[]}'), /non-empty array/)
+  assert.throws(
+    () => loadDataset(JSON.stringify({ name: 'x', questions: [{ id: 'q1', category: 'code-location', question: 'q?', relevantRepos: ['r', 'r'], expected: { answer: '', evidence: [], reviewed: false } }] })),
+    /relevantRepos contains duplicates/,
+  )
 })
 
 test('extractCitations resolves slash-bearing repo names by longest prefix', () => {
@@ -57,6 +61,14 @@ test('extractCitations drops unknown projects, bad ranges, and duplicates', () =
   const citations = extractCitations(answer, ['grp/alpha'])
   // 5-3 inverted range dropped; the duplicate :1 collapsed; unknown repo ignored.
   assert.deepEqual(citations.map((c) => c.raw), ['grp/alpha/hello.js:1'])
+})
+
+test('extractCitations ignores URL-ish text (ports are not line numbers)', () => {
+  const answer = 'docs at https://x/y.js:8080 and http://grp/alpha/README.md:1 — but see grp/alpha/hello.js:7 and (`grp/alpha/bye.js:2`).'
+  const citations = extractCitations(answer, ['x', 'grp/alpha'])
+  // A citation's project segment must not be glued onto a URL path; the
+  // bare and parenthesized citations still count.
+  assert.deepEqual(citations.map((c) => c.raw), ['grp/alpha/hello.js:7', 'grp/alpha/bye.js:2'])
 })
 
 test('CBM index names map round-trip to fleet names', () => {

@@ -51,6 +51,48 @@ test('recordedIds reads the resume set and survives a corrupt trailing line', ()
   }
 })
 
+// A timed-out turn is cancelled; the agent's late flush (chunk + idle) must
+// land in the timed-out row, never bleed into the next question's answer.
+test('a cancelled turn keeps its late updates to itself', { timeout: 20000 }, async () => {
+  const server = createServer((req, res) => {
+    if (req.url === '/api/repos') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ repos: [], agentWorkspace: mkdtempSync(join(tmpdir(), 'baize-bench-ws-')) }))
+      return
+    }
+    res.writeHead(404).end()
+  })
+  const home = mkdtempSync(join(tmpdir(), 'baize-bench-home-'))
+  const bridge = createAcpBridge({ server, home, agentCommand: `node ${FAKE}` })
+  const bound = await listen(server, { port: 0 })
+  const dir = mkdtempSync(join(tmpdir(), 'baize-bench-out-'))
+  const out = join(dir, 'run.jsonl')
+  const dataset = loadDataset(
+    JSON.stringify({
+      name: 'bleed',
+      questions: [
+        { id: 'q-slow', category: 'ambiguous-debugging', question: 'slow-bleed: never answers', expected: { answer: '', evidence: [], reviewed: false }, relevantRepos: ['grp/alpha'] },
+        { id: 'q-fast', category: 'code-location', question: 'where?', expected: { answer: '', evidence: [], reviewed: false }, relevantRepos: ['grp/alpha'] },
+      ],
+    }),
+  )
+  try {
+    await runDataset({ baseUrl: `http://${bound.host}:${bound.port}`, dataset, out, timeoutMs: 500 })
+    const entries = readFileSync(out, 'utf8').split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l))
+    assert.match(entries[0].error, /timed out/)
+    // The cancelled turn's late chunk belongs to the row that timed out…
+    assert.match(entries[0].answer, /LATE-BLEED/)
+    // …and the next question stays clean.
+    assert.equal(entries[1].error, null)
+    assert.ok(!entries[1].answer.includes('LATE-BLEED'), `bled: ${entries[1].answer}`)
+  } finally {
+    await bridge.stop()
+    await close(server)
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 // End-to-end through the real bridge against the fake ACP agent: the runner's
 // wire sequence (initialize → session/new → session/prompt) must produce one
 // JSONL line per question, auto-approve the agent's permission requests, and

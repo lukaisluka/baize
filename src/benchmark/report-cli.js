@@ -4,14 +4,15 @@
  *
  *   node src/benchmark/report-cli.js /tmp/baize-run.jsonl \
  *     --dataset benchmark/datasets/baize.json \
- *     --reviews /tmp/baize-reviews.jsonl \
  *     --url http://127.0.0.1:8940 \
+ *     [--reviews /tmp/baize-reviews.jsonl] \
  *     [--out report.md]
  *
- * --url fetches the live /api/repos snapshot (repo -> worktree map for
- * citation validation). Without it, citations cannot be resolved and the
- * evidence-validity metric reports 0 valid — pass --url against a running
- * server whose home still has the run's worktrees.
+ * --url is REQUIRED: it fetches the live /api/repos snapshot (repo →
+ * worktree map + indexed fleet) that evidence validity and the leakage
+ * check are computed against. Without it both metrics would read as
+ * confident nonsense (0% validity, everything "leaked"), so the CLI
+ * refuses rather than emitting that.
  */
 
 import { readFileSync, writeFileSync } from 'node:fs'
@@ -20,13 +21,15 @@ import { computeReport, loadRun, loadReviews, toMarkdown, worktreeResolver } fro
 
 function arg(name, fallback = null) {
   const index = process.argv.indexOf(name)
-  return index >= 0 ? process.argv[index + 1] : fallback
+  const value = index >= 0 ? process.argv[index + 1] : undefined
+  return value !== undefined ? value : fallback
 }
 
 const runPath = process.argv[2]
 const datasetPath = arg('--dataset')
-if (!runPath || !datasetPath) {
-  console.error('usage: report-cli.js <run.jsonl> --dataset <dataset.json> [--reviews <reviews.jsonl>] [--url http://127.0.0.1:<port>] [--out <report.md>]')
+const url = arg('--url')
+if (!runPath || !datasetPath || !url || runPath.startsWith('--')) {
+  console.error('usage: report-cli.js <run.jsonl> --dataset <dataset.json> --url http://127.0.0.1:<port> [--reviews <reviews.jsonl>] [--out <report.md>]')
   process.exit(2)
 }
 
@@ -35,19 +38,13 @@ const { entries, skipped } = loadRun(runPath)
 if (skipped.length > 0) console.error(`warning: ${skipped.length} corrupt line(s) skipped (interrupted write?)`)
 const reviews = loadReviews(arg('--reviews'))
 
-let worktreeByRepo = new Map()
-const url = arg('--url')
-if (url) {
-  const response = await fetch(`${url.replace(/\/$/, '')}/api/repos`)
-  if (!response.ok) {
-    console.error(`GET ${url}/api/repos -> HTTP ${response.status}`)
-    process.exit(1)
-  }
-  const { repos } = await response.json()
-  worktreeByRepo = new Map(repos.map((r) => [r.name, r.path]))
-} else {
-  console.error('warning: no --url — citations cannot be resolved; evidence validity will read 0 valid')
+const response = await fetch(`${url.replace(/\/$/, '')}/api/repos`)
+if (!response.ok) {
+  console.error(`GET ${url}/api/repos -> HTTP ${response.status}`)
+  process.exit(1)
 }
+const { repos } = await response.json()
+const worktreeByRepo = new Map(repos.map((r) => [r.name, r.path]))
 
 const report = computeReport({
   entries,

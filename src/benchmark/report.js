@@ -14,7 +14,7 @@
  * Plus the leakage check: touched repos must all be in the indexed fleet.
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { loadDataset } from './dataset.js'
 
 /** Loads a run's JSONL; a corrupt trailing line (interrupted write) is
@@ -34,36 +34,57 @@ export function loadRun(runPath) {
 }
 
 /** Loads human reviews ({id, rating, rater?} JSONL). Unknown ratings are a
- * dataset error — they would silently skew the useful rate. */
+ * dataset error — they would silently skew the useful rate. Malformed lines
+ * carry file context; duplicate ids keep the last review. */
 export function loadReviews(reviewsPath) {
   if (!reviewsPath || !existsSync(reviewsPath)) return new Map()
   const reviews = new Map()
-  for (const line of readFileSync(reviewsPath, 'utf8').split('\n')) {
-    if (!line.trim()) continue
-    const review = JSON.parse(line)
+  const lines = readFileSync(reviewsPath, 'utf8').split('\n')
+  lines.forEach((line, i) => {
+    if (!line.trim()) return
+    let review
+    try {
+      review = JSON.parse(line)
+    } catch (err) {
+      throw new Error(`${reviewsPath}:${i + 1}: review is not valid JSON: ${err.message}`)
+    }
     if (review.rating !== 'useful' && review.rating !== 'not-useful') {
       throw new Error(`review for ${review.id}: rating must be "useful" or "not-useful" (got ${JSON.stringify(review.rating)})`)
     }
     reviews.set(review.id, review)
-  }
+  })
   return reviews
 }
 
 /** The default citation resolver: checks the file exists in the repo's
  * worktree and the cited line range fits the file. The worktree is at the
  * indexed revision (sync keeps it there), so a resolve at the worktree IS
- * a resolve at the indexed revision. */
+ * a resolve at the indexed revision. Paths come from agent answers, so
+ * traversal (`..`) and symlink escapes out of the worktree are rejected —
+ * "resolves" must mean inside the repo, not anywhere on disk. */
 export function worktreeResolver(worktreeByRepo) {
   return (citation) => {
     const worktree = worktreeByRepo.get(citation.repo)
     if (!worktree) return { ok: false, reason: `repo "${citation.repo}" not in fleet` }
-    let content
+    if (citation.path.split('/').includes('..')) return { ok: false, reason: `path escapes the worktree (..): ${citation.path}` }
+    let realPath
+    let worktreeRoot
     try {
-      content = readFileSync(`${worktree}/${citation.path}`, 'utf8')
+      worktreeRoot = realpathSync(worktree)
+      realPath = realpathSync(`${worktree}/${citation.path}`)
     } catch {
       return { ok: false, reason: `file not found: ${citation.path}` }
     }
-    const lines = content.split('\n').length
+    if (!realPath.startsWith(`${worktreeRoot}/`)) return { ok: false, reason: `path escapes the worktree: ${citation.path}` }
+    let content
+    try {
+      content = readFileSync(realPath, 'utf8')
+    } catch {
+      return { ok: false, reason: `unreadable: ${citation.path}` }
+    }
+    // A trailing newline creates a phantom empty last element; :3 on a
+    // two-line file must not count as inside the file.
+    const lines = content.endsWith('\n') ? content.split('\n').length - 1 : content.split('\n').length
     if (citation.endLine > lines) return { ok: false, reason: `line ${citation.endLine} beyond EOF (${lines} lines): ${citation.path}` }
     return { ok: true }
   }
@@ -79,9 +100,13 @@ export function computeReport({ entries, dataset, reviews, resolveCitation, inde
   // A retried question leaves both rows in the JSONL (the timed-out one and
   // the retry) — the LAST row is the truth; earlier rows must not reach the
   // metrics. Map.set keeps first-insertion order, so row order is stable.
+  // Rows whose id is not in this dataset (a stale JSONL from another
+  // revision) are counted and surfaced, never silently dropped.
   const latest = new Map()
+  let ignoredRows = 0
   for (const entry of entries) {
     if (byId.has(entry.id)) latest.set(entry.id, entry)
+    else ignoredRows += 1
   }
   const rows = []
   let citationsTotal = 0
@@ -116,7 +141,7 @@ export function computeReport({ entries, dataset, reviews, resolveCitation, inde
     const review = reviews.get(entry.id)
     rows.push({
       id: entry.id,
-      category: entry.category,
+      category: question.category,
       question: question.question,
       stopReason: entry.stopReason,
       error: entry.error ?? null,
@@ -139,7 +164,7 @@ export function computeReport({ entries, dataset, reviews, resolveCitation, inde
   const unanswered = rows.filter((r) => (r.answerChars ?? 0) === 0)
   return {
     dataset: dataset.name,
-    questions: { total: dataset.questions.length, run: rows.length, missing: dataset.questions.filter((q) => !rows.some((r) => r.id === q.id)).map((q) => q.id) },
+    questions: { total: dataset.questions.length, run: rows.length, missing: dataset.questions.filter((q) => !rows.some((r) => r.id === q.id)).map((q) => q.id), ignoredRows },
     evidenceValidity: { valid: citationsValid, total: citationsTotal, rate: citationsTotal === 0 ? null : citationsValid / citationsTotal },
     repoRecall: { mean: recallValues.length === 0 ? null : recallValues.reduce((a, b) => a + b, 0) / recallValues.length, perQuestion: recallValues.length },
     usefulRate: { useful: rated.filter((r) => r.rating === 'useful').length, rated: rated.length, pending: rows.length - rated.length, rate: rated.length === 0 ? null : rated.filter((r) => r.rating === 'useful').length / rated.length },
@@ -155,7 +180,7 @@ export function toMarkdown(report) {
   const lines = []
   lines.push(`# Benchmark report — ${report.dataset}`)
   lines.push('')
-  lines.push(`Questions: ${report.questions.run} run / ${report.questions.total} in dataset` + (report.questions.missing.length > 0 ? ` (missing: ${report.questions.missing.join(', ')})` : ''))
+  lines.push(`Questions: ${report.questions.run} run / ${report.questions.total} in dataset` + (report.questions.missing.length > 0 ? ` (missing: ${report.questions.missing.join(', ')})` : '') + (report.questions.ignoredRows > 0 ? ` (${report.questions.ignoredRows} run row(s) matched no dataset question — stale JSONL?)` : ''))
   lines.push('')
   lines.push('| Metric | Value | Detail |')
   lines.push('| --- | --- | --- |')

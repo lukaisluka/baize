@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -34,13 +34,22 @@ test('evidence validity: citations must resolve inside the worktree at the index
   const dir = mkdtempSync(join(tmpdir(), 'baize-rep-'))
   try {
     const alpha = join(dir, 'alpha')
+    const outside = join(dir, 'outside')
     mkdirSync(alpha)
-    writeFileSync(join(alpha, 'hello.js'), 'line1\nline2\nline3\n')
+    mkdirSync(outside)
+    // Two real lines + trailing newline: :2 is valid, :3 is beyond EOF.
+    writeFileSync(join(alpha, 'hello.js'), 'line1\nline2\n')
+    writeFileSync(join(outside, 'secret.txt'), 'x\n')
+    symlinkSync('../outside/secret.txt', join(alpha, 'link.js'))
     const resolve = worktreeResolver(new Map([['grp/alpha', alpha]]))
-    assert.deepEqual(resolve({ repo: 'grp/alpha', path: 'hello.js', startLine: 1, endLine: 3 }), { ok: true })
-    assert.match(resolve({ repo: 'grp/alpha', path: 'hello.js', startLine: 1, endLine: 9 }).reason, /beyond EOF/)
+    assert.deepEqual(resolve({ repo: 'grp/alpha', path: 'hello.js', startLine: 1, endLine: 2 }), { ok: true })
+    assert.match(resolve({ repo: 'grp/alpha', path: 'hello.js', startLine: 1, endLine: 3 }).reason, /beyond EOF \(2 lines\)/)
     assert.match(resolve({ repo: 'grp/alpha', path: 'nope.js', startLine: 1, endLine: 1 }).reason, /file not found/)
     assert.match(resolve({ repo: 'other', path: 'x', startLine: 1, endLine: 1 }).reason, /not in fleet/)
+    // Paths come from agent answers: traversal and symlink escapes out of
+    // the worktree are not "resolving in the repo".
+    assert.match(resolve({ repo: 'grp/alpha', path: '../outside/secret.txt', startLine: 1, endLine: 1 }).reason, /escapes the worktree/)
+    assert.match(resolve({ repo: 'grp/alpha', path: 'link.js', startLine: 1, endLine: 1 }).reason, /escapes the worktree/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -102,6 +111,7 @@ test('a retried question is scored by its last row only', () => {
     entries: [
       entry('q1', { answer: '', error: 'prompt timed out', touchedRepos: ['evil/repo'] }),
       entry('q1', { answer: 'ok', touchedRepos: ['grp/alpha'], citations: [{ repo: 'grp/alpha', path: 'a.js', startLine: 1, endLine: 1, raw: 'grp/alpha/a.js:1' }] }),
+      entry('from-another-dataset'),
     ],
     reviews: new Map(),
     resolveCitation: () => ({ ok: true }),
@@ -112,6 +122,9 @@ test('a retried question is scored by its last row only', () => {
   // The timed-out row's touched repo must not leak into the metrics.
   assert.deepEqual(report.leakage.leakedRepos, [])
   assert.equal(report.evidenceValidity.rate, 1)
+  // Stale rows from another dataset revision are surfaced, not dropped.
+  assert.equal(report.questions.ignoredRows, 1)
+  assert.ok(toMarkdown(report).includes('1 run row(s) matched no dataset question'))
 })
 
 test('loadReviews rejects unknown ratings — they would silently skew the rate', () => {

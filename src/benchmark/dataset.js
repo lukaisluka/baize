@@ -70,6 +70,8 @@ export function loadDataset(raw) {
       const relevant = item.relevantRepos
       if (!Array.isArray(relevant) || relevant.length === 0 || relevant.some((r) => typeof r !== 'string' || !r.trim())) {
         errors.push(`${at} (${item.id}): relevantRepos must be a non-empty array of repo names`)
+      } else if (new Set(relevant).size !== relevant.length) {
+        errors.push(`${at} (${item.id}): relevantRepos contains duplicates`)
       }
       const expected = item.expected
       if (!expected || typeof expected !== 'object') {
@@ -110,8 +112,11 @@ export function loadDataset(raw) {
 
 /** A citation as the agent contract states it (#10, src/agent-workspace.js):
  * `<project>/<path>:<line>` with an optional `-end` range, the project part
- * being a fleet repo name (which itself contains slashes). */
-const CITATION_PATTERN = /`?([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+):(\d+)(?:-(\d+))?`?/g
+ * being a fleet repo name (which itself contains slashes). The negative
+ * lookbehind keeps URL-ish text (`https://x/y.js:8080`, `http://grp/alpha/…`)
+ * from matching: a citation's project segment must not be glued to a
+ * preceding path/word character. */
+const CITATION_PATTERN = /(?<![/\w.-])([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+):(\d+)(?:-(\d+))?/g
 
 /** Extracts citations from an answer, resolving the repo by longest-prefix
  * match against the known fleet names (a name is itself path-shaped).
@@ -129,7 +134,7 @@ export function extractCitations(answer, repoNames) {
     const startLine = Number(match[2])
     const endLine = match[3] ? Number(match[3]) : startLine
     if (startLine === 0 || endLine < startLine) continue
-    const raw = match[0].replace(/`/g, '')
+    const raw = match[0]
     if (seen.has(raw)) continue
     seen.add(raw)
     citations.push({ repo, path, startLine, endLine, raw })

@@ -7,7 +7,8 @@
  * extracted citations, and the fleet repos the turn actually touched.
  *
  * Results land as JSONL, one line per question, appended incrementally:
- * a long run can be Ctrl-C'd and re-invoked — existing ids are skipped.
+ * a long run can be Ctrl-C'd and re-invoked — successfully recorded ids
+ * are skipped, errored ones (prompt timeouts) are retried.
  *
  * Human judgments are deliberately NOT the runner's: evidence validity and
  * repo recall are computed offline from the JSONL (report.js); the useful
@@ -15,7 +16,6 @@
  */
 
 import { createWriteStream, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { open } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import WebSocket from 'ws'
@@ -139,6 +139,27 @@ function createAcpClient(wsUrl, onPermission) {
   return { ws, opened, request, notify, updateListeners }
 }
 
+/** Resolves when the agent reports status idle — the protocol-level "the
+ * cancelled turn has fully flushed" marker. Updates that arrive before it
+ * belong to the dead turn; collecting the next question's updates only
+ * after it keeps turn attribution off the clock. `ms` caps the wait for
+ * agents that never settle. */
+function waitForIdle(client, ms) {
+  return new Promise((resolve) => {
+    const listener = (update) => {
+      if (update?.sessionUpdate === 'status_changed' && update.status === 'idle') cleanup(true)
+    }
+    const timer = setTimeout(() => cleanup(false), ms)
+    const cleanup = (idle) => {
+      clearTimeout(timer)
+      const index = client.updateListeners.indexOf(listener)
+      if (index >= 0) client.updateListeners.splice(index, 1)
+      resolve(idle)
+    }
+    client.updateListeners.push(listener)
+  })
+}
+
 /**
  * Runs a dataset against the live server at `baseUrl` (e.g. http://127.0.0.1:8940).
  * Options: { out (required path), timeoutMs = 240_000, logger, cwd (session
@@ -152,8 +173,7 @@ function createAcpClient(wsUrl, onPermission) {
 export async function runDataset({ baseUrl, dataset, out, timeoutMs = 240_000, cwd, logger }) {
   const log = logger ?? { info: () => {}, warn: () => {}, error: () => {} }
   const fleet = await fetchJson(`${baseUrl}/api/repos`)
-  const repos = fleet.repos
-  const repoNames = repos.map((r) => r.name)
+  const repoNames = fleet.repos.map((r) => r.name)
   log.info(`benchmark: fleet has ${repoNames.length} repos: ${repoNames.join(', ') || '(none)'}`)
 
   const ownsScratch = !cwd && !fleet.agentWorkspace
@@ -161,29 +181,58 @@ export async function runDataset({ baseUrl, dataset, out, timeoutMs = 240_000, c
   if (cwd) log.info(`benchmark: session cwd is ${scratchDir}`)
   else if (fleet.agentWorkspace) log.info(`benchmark: session cwd is the server's agent workspace (${scratchDir})`)
   else log.warn(`benchmark: server did not report an agent workspace; using a fresh scratch dir (${scratchDir}) — the agent will lack the fleet AGENTS.md guidance`)
+
   const grantedPermissions = []
   const client = createAcpClient(`${baseUrl.replace(/\/$/, '')}/acp`, (title, option) => {
     grantedPermissions.push({ title, option })
     log.info(`benchmark: auto-approved permission "${title}" (${option ?? 'no allow option — cancelled'})`)
   })
-  await client.opened
-  await client.request('initialize', {
-    protocolVersion: 1,
-    clientCapabilities: { fs: { readTextFile: false, writeFile: false } },
-  })
-  client.notify('notifications/initialized')
-  const session = await client.request('session/new', { cwd: scratchDir, mcpServers: [] })
 
-  const done = recordedIds(out)
-  const handle = await open(out, 'a')
+  // Every append waits for its write callback; a failed stream must fail
+  // them (fail fast), not hang them — disk-full would otherwise stall the
+  // run silently.
+  const pendingAppends = []
+  let streamFailure = null
+  let finished = false
   const stream = createWriteStream(out, { flags: 'a' })
-  stream.on('error', (err) => log.error(`benchmark: output stream: ${err.message}`))
+  const failAppends = (err) => {
+    if (finished) return
+    streamFailure = err
+    log.error(`benchmark: output stream: ${err.message}`)
+    for (const reject of pendingAppends.splice(0)) reject(err)
+  }
+  stream.on('error', failAppends)
+  stream.on('close', () => failAppends(new Error('output stream closed before completion')))
   const append = (line) =>
     new Promise((resolve, reject) => {
-      stream.write(line, (err) => (err ? reject(err) : resolve()))
+      if (streamFailure) return reject(streamFailure)
+      pendingAppends.push(reject)
+      stream.write(line, (err) => {
+        const index = pendingAppends.indexOf(reject)
+        if (index >= 0) pendingAppends.splice(index, 1)
+        if (err) reject(err)
+        else resolve()
+      })
     })
 
   try {
+    await client.opened
+    await withTimeout(
+      client.request('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: { fs: { readTextFile: false, writeFile: false } },
+      }),
+      30_000,
+      'initialize timed out after 30000ms',
+    )
+    client.notify('notifications/initialized')
+    const session = await withTimeout(
+      client.request('session/new', { cwd: scratchDir, mcpServers: [] }),
+      30_000,
+      'session/new timed out after 30000ms',
+    )
+
+    const done = recordedIds(out)
     for (const question of dataset.questions) {
       if (done.has(question.id)) {
         log.info(`benchmark: skip ${question.id} (already recorded)`)
@@ -209,11 +258,12 @@ export async function runDataset({ baseUrl, dataset, out, timeoutMs = 240_000, c
       } catch (err) {
         error = err.message
         if (err.message.includes('timed out')) {
-          // Stop the agent side of the dead turn and let its final updates
-          // flush into THIS question's listener — otherwise they bleed into
-          // the next question's collection.
+          // Stop the agent side of the dead turn, then hold THIS question's
+          // listener until the agent reports idle — its late updates land in
+          // this row, not the next question's.
           client.notify('session/cancel', { sessionId: session.sessionId })
-          await new Promise((resolve) => setTimeout(resolve, 250))
+          const idle = await waitForIdle(client, 5000)
+          if (!idle) log.warn(`benchmark: ${question.id}: agent never went idle after cancel — late updates may bleed into the next question`)
         }
       }
       const elapsedMs = Date.now() - startedAt
@@ -239,8 +289,11 @@ export async function runDataset({ baseUrl, dataset, out, timeoutMs = 240_000, c
       )
     }
   } finally {
-    stream.end()
-    await handle.close()
+    finished = true
+    await new Promise((resolve, reject) => {
+      if (streamFailure) reject(streamFailure)
+      else stream.end(resolve)
+    })
     client.ws.close()
     if (ownsScratch) rmSync(scratchDir, { recursive: true, force: true })
   }

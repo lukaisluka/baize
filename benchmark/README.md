@@ -66,14 +66,16 @@ dialog); every grant is recorded on the entry as `permissionsGranted`.
 
 ## Report
 
-With optional human reviews (`{"id": "q001", "rating": "useful"|"not-useful", "rater": "…"}`,
-one JSON object per line):
+With human reviews (`{"id": "q001", "rating": "useful"|"not-useful", "rater": "…"}`,
+one JSON object per line) — `--url` is **required**: the fleet snapshot it
+fetches is what evidence validity and the leakage check are computed
+against, and without it both would read as confident nonsense:
 
 ```sh
 node src/benchmark/report-cli.js /tmp/baize-run.jsonl \
   --dataset benchmark/datasets/baize.json \
-  --reviews /tmp/baize-reviews.jsonl \
   --url http://127.0.0.1:8940 \
+  --reviews /tmp/baize-reviews.jsonl \
   --out /tmp/baize-report.md
 ```
 
@@ -89,3 +91,13 @@ Metrics (PRD §15 methods):
 Caveats by design: claim↔evidence entailment stays human (PRD §15
 sampling); the useful rubric is two reviewers + tiebreaker, applied
 offline via the reviews file.
+
+Scoring notes:
+
+- A row with `error: null` but an empty answer counts as recorded (not
+  retried) — it surfaces under `anomalies.unanswered` in the report.
+- An errored row contributes a recall of 0 to the mean: a systemic
+  timeout drags fleet-wide recall down, which is the intended reading
+  (the system failed the question), not a scoring bug.
+- The leakage check compares against the *registered* fleet from
+  `/api/repos`; a repo still mid-indexing counts as in-fleet.

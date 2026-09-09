@@ -162,7 +162,7 @@ const FLEET_HTML = `<!doctype html>
     </div>
     <div id="sync-notice" class="error-text"></div>
     <table id="sync-table" hidden>
-      <thead><tr><th>Repo</th><th>Status</th><th>Branch</th><th>Last sync</th><th>Revision</th><th></th></tr></thead>
+      <thead><tr><th>Repo</th><th>Status</th><th>Branch</th><th>Last sync</th><th>Revision</th><th>Index</th><th>Indexed @</th><th></th></tr></thead>
       <tbody id="sync-rows"></tbody>
     </table>
     <div id="sync-empty" class="muted">No mirrors yet — discover and sync above; discovered repositories clone into ~/.baize/repos/.</div>
@@ -344,6 +344,21 @@ async function refreshSync() {
         refreshSync();
       } catch (err) { syncNotice.textContent = err.message; }
     });
+    // The registry's view of this mirror's index (joined from /api/repos).
+    // After a restart describe() can surface CBM's own in-progress wording —
+    // normalize to the chip classes the CSS actually knows.
+    const repo = reposCache.find((r) => r.mirror && r.name === name);
+    const rawIndex = repo?.status ?? 'unindexed';
+    const indexStatus = rawIndex === 'ready' || rawIndex === 'unindexed' || rawIndex === 'error'
+      ? rawIndex : rawIndex.includes('progress') || rawIndex.includes('indexing') ? 'indexing' : 'error';
+    const indexChip = document.createElement('span');
+    indexChip.className = 'status ' + indexStatus;
+    indexChip.textContent = rawIndex;
+    if (repo?.error) indexChip.title = repo.error;
+    if (repo?.retryAt) indexChip.title = (indexChip.title ? indexChip.title + '\\n' : '') + 'retry scheduled';
+    const indexed = document.createElement('span');
+    indexed.textContent = (repo?.lastIndexedRevision ?? '').slice(0, 10);
+    indexed.title = repo?.lastIndexedRevision ?? '';
     const syncOne = document.createElement('button');
     syncOne.textContent = 'Sync';
     syncOne.title = 'sync this repo now';
@@ -358,7 +373,7 @@ async function refreshSync() {
       } catch (err) { syncNotice.textContent = err.message; }
     });
     const time = st.lastSyncAt ? new Date(st.lastSyncAt).toLocaleTimeString() : '';
-    tr.append(td(name), statusCell, td(branch), td(time), td((st.lastRevision ?? '').slice(0, 10)), td(syncOne));
+    tr.append(td(name), statusCell, td(branch), td(time), td((st.lastRevision ?? '').slice(0, 10)), td(indexChip), td(indexed), td(syncOne));
     if (st.error) tr.title = st.error;
     return tr;
   }));
@@ -382,15 +397,21 @@ form.addEventListener('submit', async (event) => {
   }
 });
 
+let reposCache = [];
+
 async function refresh() {
   let repos = [];
   try {
     const res = await fetch('/api/repos');
     if (res.ok) repos = (await res.json()).repos;
   } catch { /* next poll retries */ }
-  empty.hidden = repos.length > 0;
-  table.hidden = repos.length === 0;
-  rows.replaceChildren(...repos.map((repo) => {
+  reposCache = repos;
+  // Mirror-synced repos belong to the Mirror sync card (index status is
+  // joined there); this card is for manually added local repos.
+  const manual = repos.filter((repo) => !repo.mirror);
+  empty.hidden = manual.length > 0;
+  table.hidden = manual.length === 0;
+  rows.replaceChildren(...manual.map((repo) => {
     const tr = document.createElement('tr');
     const td = (content) => {
       const cell = document.createElement('td');

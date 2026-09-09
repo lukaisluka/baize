@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, test } from 'node:test'
@@ -193,6 +193,11 @@ describe('fleet sync against a local git source', () => {
     assert.match(state.lastRevision, /^[0-9a-f]{40,64}$/)
     assert.ok(existsSync(engine.mirrorPathOf('grp/alpha')), 'bare mirror exists under repos/')
     assert.match(engine.mirrorPathOf('grp/alpha'), /\.git$/, 'mirror is a bare .git dir')
+    // The indexable checkout: a linked worktree at the tracked revision, not
+    // the bare mirror (whose only loose files are hook samples).
+    const wt = engine.worktreePathOf('grp/alpha')
+    assert.ok(existsSync(wt), 'linked worktree materialized under worktrees/')
+    assert.equal(readFileSync(join(wt, 'file.txt'), 'utf8'), 'one\n', 'worktree holds the source checkout')
   })
 
   test('fetch keeps the mirror current on later cycles', { timeout: 60000 }, async () => {
@@ -213,10 +218,58 @@ describe('fleet sync against a local git source', () => {
     // setBranch queues a targeted re-sync — no explicit syncAll needed for
     // the recorded revision to follow the new branch.
     await waitFor(() => engine.states()['grp/alpha'].lastRevision === releaseHead)
+    assert.equal(git(engine.worktreePathOf('grp/alpha'), 'rev-parse', 'HEAD'), releaseHead, 'worktree follows the override')
 
     engine.setBranch('grp/alpha', null)
     assert.equal(config.mirrors['grp/alpha'], undefined, 'cleared override leaves no empty mirror entry behind')
     await waitFor(() => engine.states()['grp/alpha'].lastRevision === mainHead)
+    assert.equal(git(engine.worktreePathOf('grp/alpha'), 'rev-parse', 'HEAD'), mainHead)
+  })
+})
+
+describe('revision-change hook (the #13 loop trigger)', () => {
+  const work = mkdtempSync(join(tmpdir(), 'baize-sync-hook-'))
+  const home = tempHome()
+  const source = makeSourceRepo(work)
+  const allowLocal = (url) => String(url).startsWith('/') || isValidRemoteUrl(url)
+  const config = { gitlab: { selection: { type: 'repos', repos: ['grp/alpha'] } }, mirrors: {} }
+  const gitlab = {
+    discover: async () => ({ repos: [{ name: 'grp/alpha', sshUrl: source, httpUrl: source, defaultBranch: 'main', webUrl: 'x' }] }),
+  }
+  const seen = []
+  let engine
+
+  before(() => {
+    engine = createSyncEngine({
+      home, config, save: () => {}, gitlab, logger: quietLogger, validateUrl: allowLocal,
+      onRevision: (name, revision, path) => seen.push([name, revision, path]),
+    })
+  })
+  after(async () => {
+    await engine.stop()
+    rmSync(work, { recursive: true, force: true })
+    cleanupHome(home)
+  })
+
+  test('fires on first clone, not on unchanged fetches, and again on a new revision', { timeout: 60000 }, async () => {
+    await engine.syncAll() // clone
+    assert.equal(seen.length, 1, 'first clone fires')
+    assert.equal(seen[0][0], 'grp/alpha')
+    assert.match(seen[0][1], /^[0-9a-f]{40,64}$/)
+    // The hook carries the WORKTREE path — the readable checkout the indexer
+    // reads — not the bare mirror path.
+    assert.equal(seen[0][2], engine.worktreePathOf('grp/alpha'))
+    assert.ok(existsSync(join(seen[0][2], 'file.txt')), 'worktree has the source checked out')
+
+    await engine.syncAll() // fetch, no change
+    assert.equal(seen.length, 1, 'unchanged revision does not fire')
+
+    commitIn(source, 'two')
+    await engine.syncAll() // fetch, new head
+    assert.equal(seen.length, 2, 'new revision fires')
+    assert.match(seen[1][1], /^[0-9a-f]{40,64}$/)
+    assert.notEqual(seen[1][1], seen[0][1])
+    assert.equal(readFileSync(join(seen[1][2], 'file.txt'), 'utf8'), 'two\n', 'worktree content follows the new revision')
   })
 })
 
@@ -288,6 +341,20 @@ describe('mirror healing and config hygiene', () => {
     assert.notEqual(engine.states()['grp/beta'], undefined, 'grace cycle keeps the state')
     await engine.syncAll() // second omission — both latest discoveries agree
     assert.equal(engine.states()['grp/beta'], undefined, 'state pruned after two omissions')
+  })
+
+  test('a stale worktree whose mirror died is re-materialized, not stuck in error', { timeout: 60000 }, async () => {
+    // Simulate crash debris: the mirror is gone (killed clone) but its
+    // worktree dir survives, pointing into a gitdir that no longer exists.
+    const wt = engine.worktreePathOf('grp/alpha')
+    assert.ok(existsSync(wt), 'precondition: worktree from earlier syncs')
+    rmSync(engine.mirrorPathOf('grp/alpha'), { recursive: true, force: true })
+    const result = await engine.syncAll()
+    assert.equal(result.synced, 1)
+    assert.equal(engine.states()['grp/alpha'].status, 'idle')
+    assert.ok(existsSync(wt), 'worktree exists again')
+    assert.equal(git(wt, 'rev-parse', '--is-inside-work-tree'), 'true', 'worktree is live again')
+    assert.ok(existsSync(join(wt, 'file.txt')), 'checkout restored')
   })
 
   test('setBranch rejects names the engine has never seen', () => {

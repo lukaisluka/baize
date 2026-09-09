@@ -11,7 +11,7 @@ function slugify(path) {
 }
 
 // A git repo for CBM purposes is anything `git rev-parse --git-dir` accepts —
-// work trees and the bare mirrors that fleet sync (#12) will create alike.
+// work trees and the bare mirrors that fleet sync (#12) creates alike.
 // Distinguishes "not a repo" (400) from "git missing" (500) so the real
 // cause is never masked.
 function checkGitRepo(path) {
@@ -30,11 +30,24 @@ function checkGitRepo(path) {
 }
 
 // Repo registry + one background index job per repo. Registered repos live in
-// config.repos (name -> { path, addedAt }) so they survive restarts; job state
-// is in-memory and re-derived from CBM's index_status after a restart.
-// Status vocabulary: 'indexing' | 'ready' | 'error' | 'unindexed'.
-export function createRepoRegistry({ config, save, logger, cbm }) {
-  const jobs = new Map() // name -> { status, error?, stats? }
+// config.repos (name -> { path, addedAt, mirror?, lastIndexedRevision? }) so
+// they survive restarts; job state is in-memory and re-derived from CBM's
+// index_status after a restart. Status vocabulary: 'indexing' | 'ready' |
+// 'error' | 'unindexed'. Failed index jobs retry on the same exponential
+// schedule fleet sync uses; a scheduled retry carries the newest revision it
+// saw, so re-kicks while waiting collapse into it instead of stacking.
+const RETRY_SCHEDULE_MINUTES = [1, 5, 15, 60, 240, 1440]
+
+export function createRepoRegistry({
+  config,
+  save,
+  logger,
+  cbm,
+  retryDelaysMs = RETRY_SCHEDULE_MINUTES.map((m) => m * 60 * 1000),
+  now = Date.now,
+}) {
+  const jobs = new Map() // name -> { status, error?, stats?, retryAttempt, retryTimer?, retryAt?, pendingRevision? }
+  let stopped = false
 
   function uniqueName(base) {
     const names = new Set(Object.keys(config.repos))
@@ -44,32 +57,87 @@ export function createRepoRegistry({ config, save, logger, cbm }) {
     return `${base}-${i}`
   }
 
-  // Fire-and-forget: kicks the index job if one is not already running for the
-  // repo. Re-submissions while a job runs (reindex, re-POST of a registered
-  // path) collapse into the running job instead of enqueuing a second index.
-  function kickIndex(name) {
-    const job = jobs.get(name)
-    if (job?.status === 'indexing') return job
-
+  // Fire-and-forget: kicks the index job if one is not already running for
+  // the repo. Re-submissions while a job runs (reindex, re-POST of a
+  // registered path, a new synced revision) collapse into the running job
+  // instead of enqueuing a second index; while a retry is scheduled they
+  // just retarget it. With a revision, the job is idempotent: re-kicking
+  // the exact revision that was last indexed is a no-op.
+  function kickIndex(name, { revision = null, force = false } = {}) {
     const entry = config.repos[name]
-    const record = { status: 'indexing' }
+    const job = jobs.get(name) ?? { status: 'ready' }
+    if (job.status === 'indexing') {
+      // Collapse into the running job, but remember the newest revision seen:
+      // if the run completes on an older one, completion re-kicks immediately.
+      job.latestRevision = revision ?? job.latestRevision
+      return job
+    }
+    if (job.retryTimer && !force) {
+      job.pendingRevision = revision ?? job.pendingRevision
+      return job
+    }
+    if (job.retryTimer) {
+      clearTimeout(job.retryTimer)
+      job.retryTimer = null
+      job.retryAt = null
+      // The forced run supersedes the scheduled retry — inherit its target.
+      // Dropping it would make the retry-fallback below aim at an
+      // already-indexed revision, which the idempotency guard turns into a
+      // silent no-op: the job would sit in 'error' forever.
+      revision = revision ?? job.pendingRevision
+    }
+    if (stopped) return job
+    if (!force && revision && entry.lastIndexedRevision === revision) return job
+
+    const record = { status: 'indexing', retryAttempt: job.retryAttempt ?? 0, latestRevision: revision }
     jobs.set(name, record)
-    logger.info(`repos: indexing ${name} (${entry.path})`)
+    logger.info(`repos: indexing ${name} (${entry.path}${revision ? ` @ ${revision.slice(0, 10)}` : ''})`)
 
     cbm
       .call('index_repository', { repo_path: entry.path, name })
       .then((result) => {
         record.status = 'ready'
+        record.error = null
         record.stats = { nodes: result?.nodes, edges: result?.edges }
         record.indexedAt = new Date().toISOString()
+        record.retryAttempt = 0
+        if (revision) {
+          entry.lastIndexedRevision = revision
+          save()
+        }
         logger.info(`repos: indexed ${name} (${result?.nodes ?? '?'} nodes, ${result?.edges ?? '?'} edges)`)
+        // A newer revision arrived while this run was in flight — index it
+        // now instead of waiting for the next sync cycle to notice.
+        if (record.latestRevision && record.latestRevision !== revision) {
+          kickIndex(name, { revision: record.latestRevision })
+        }
       })
       .catch((err) => {
         record.status = 'error'
         record.error = err.message
         logger.error(`repos: indexing ${name} failed: ${err.message}`)
+        // Retry the revision this run targeted — never entry.lastIndexedRevision:
+        // an already-indexed revision is by definition not a valid retry
+        // target (the idempotency guard would swallow it).
+        scheduleRetry(name, record.latestRevision ?? null, record)
       })
     return record
+  }
+
+  function scheduleRetry(name, revision, record) {
+    if (stopped) return
+    const delayMs = retryDelaysMs[Math.min(record.retryAttempt, retryDelaysMs.length - 1)]
+    record.retryAttempt += 1
+    record.retryAt = now() + delayMs
+    record.pendingRevision = revision
+    record.retryTimer = setTimeout(() => {
+      record.retryTimer = null
+      record.retryAt = null
+      if (stopped) return
+      kickIndex(name, { revision: record.pendingRevision ?? null })
+    }, delayMs)
+    record.retryTimer.unref()
+    logger.warn(`repos: retrying ${name} index in ${Math.round(delayMs / 1000)}s (attempt ${record.retryAttempt})`)
   }
 
   function add(rawPath, rawName) {
@@ -96,11 +164,52 @@ export function createRepoRegistry({ config, save, logger, cbm }) {
     return { name, path }
   }
 
+  // Fleet mirrors (#13): bare mirrors under ~/.baize/repos owned by GitLab
+  // project names. Registered with the exact GitLab name so the CBM project
+  // identity is stable across restarts; a manually-added repo owning the
+  // same name wins and the mirror takes a suffix. Called by the sync engine
+  // whenever a mirror lands on a revision its index has not seen.
+  function ensureFleetRepo(rawName, path, revision) {
+    // Ownership lookup is keyed by the worktree PATH, not the name: it is
+    // per-project deterministic, so a suffixed entry is found again on
+    // every later visit (every restart re-fires onRevision — a name-keyed
+    // lookup would mint alpha-3, alpha-4, … and a full re-index each time).
+    const mine = Object.entries(config.repos).find(([, e]) => e.mirror === true && e.path === path)
+    let name = mine ? mine[0] : rawName
+    let entry = config.repos[name]
+    if (!mine && entry && (entry.mirror !== true || entry.path !== path)) {
+      // The name belongs to someone else (manual repo, or another fleet
+      // project that arrived via suffixing) — never re-point it; take the
+      // next free suffix instead.
+      name = uniqueName(rawName)
+      entry = config.repos[name]
+    }
+    if (!entry) {
+      config.repos[name] = { path, addedAt: new Date().toISOString(), mirror: true }
+      save()
+    }
+    if (stopped) return
+    kickIndex(name, { revision })
+  }
+
   async function describe(name, entry) {
     const job = jobs.get(name)
-    const base = { name, path: entry.path, addedAt: entry.addedAt }
+    const base = {
+      name,
+      path: entry.path,
+      addedAt: entry.addedAt,
+      mirror: Boolean(entry.mirror),
+      lastIndexedRevision: entry.lastIndexedRevision ?? null,
+    }
     if (job) {
-      return { ...base, status: job.status, error: job.error, stats: job.stats, indexedAt: job.indexedAt }
+      return {
+        ...base,
+        status: job.status,
+        error: job.error,
+        stats: job.stats,
+        indexedAt: job.indexedAt,
+        retryAt: job.retryAt ?? null,
+      }
     }
     // No local job (fresh restart): derive from CBM's own state. CBM's
     // status field leads ('ready', or its own in-progress wording); only a
@@ -115,7 +224,21 @@ export function createRepoRegistry({ config, save, logger, cbm }) {
       }
     } catch (err) {
       if (/not found or not indexed/.test(err.message)) {
-        return { ...base, status: 'unindexed' }
+        // CBM's index is the truth; the config token must yield. A cleared or
+        // corrupted ~/.baize/index would otherwise pin lastIndexedRevision
+        // forever while this very status honestly says 'unindexed' — and the
+        // idempotency guard would turn every future kick for that revision
+        // into a no-op. Drop the stale token and rebuild the index.
+        const token = entry.lastIndexedRevision
+        if (token) {
+          delete entry.lastIndexedRevision
+          save()
+          if (!stopped) {
+            logger.warn(`repos: ${name} index missing in CBM (config claimed ${token.slice(0, 10)}) — re-indexing`)
+            kickIndex(name, { revision: token })
+          }
+        }
+        return { ...base, lastIndexedRevision: null, status: 'unindexed' }
       }
       return { ...base, status: 'error', error: err.message }
     }
@@ -131,8 +254,21 @@ export function createRepoRegistry({ config, save, logger, cbm }) {
       err.statusCode = 404
       throw err
     }
-    return kickIndex(name)
+    return kickIndex(name, { force: true })
   }
 
-  return { add, list, reindex }
+  function stop() {
+    // Retry timers must not outlive the app: clear them before CBM is torn
+    // down, and stop accepting new kicks (in-flight calls rejecting during
+    // cbm.stop() must not schedule fresh retries).
+    stopped = true
+    for (const job of jobs.values()) {
+      if (job.retryTimer) {
+        clearTimeout(job.retryTimer)
+        job.retryTimer = null
+      }
+    }
+  }
+
+  return { add, ensureFleetRepo, list, reindex, stop }
 }
